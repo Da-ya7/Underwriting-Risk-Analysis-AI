@@ -1,0 +1,51 @@
+{
+  "features": [
+    "age",
+    "annual_income",
+    "sum_assured",
+    "bmi",
+    "smoker",
+    "alcohol_consumption",
+    "pre_existing_disease",
+    "family_medical_history",
+    "occupation_risk",
+    "credit_score",
+    "num_previous_claims",
+    "years_with_insurer"
+  ],
+  "importances": {
+    "age": 0.085,
+    "annual_income": 0.1073,
+    "sum_assured": 0.1,
+    "bmi": 0.0991,
+    "smoker": 0.1001,
+    "alcohol_consumption": 0.0406,
+    "pre_existing_disease": 0.0448,
+    "family_medical_history": 0.025,
+    "occupation_risk": 0.0442,
+    "credit_score": 0.2416,
+    "num_previous_claims": 0.0395,
+    "years_with_insurer": 0.0729
+  },
+  "direction": {
+    "age": 1,
+    "annual_income": -1,
+    "sum_assured": 0,
+    "bmi": 1,
+    "smoker": 1,
+    "alcohol_consumption": 1,
+    "pre_existing_disease": 1,
+    "family_medical_history": 1,
+    "occupation_risk": 1,
+    "credit_score": -1,
+    "num_previous_claims": 1,
+    "years_with_insurer": -1
+  },
+  "risk_thresholds": {
+    "age": 55,
+    "bmi": 30,
+    "credit_score": 650,
+    "num_previous_claims": 2,
+    "years_with_insurer": 1
+  }
+}

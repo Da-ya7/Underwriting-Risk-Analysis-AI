@@ -1,0 +1,15 @@
+# venv
+venv/
+env/
+
+# python cache
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS junk
+.DS_Store
+Thumbs.db
