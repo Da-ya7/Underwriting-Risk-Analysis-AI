@@ -49,7 +49,35 @@ class ProposalRequest(BaseModel):
                 "years_with_insurer": 0,
             }
         }
+class RawProposalRequest(BaseModel):
+    age: int = Field(..., ge=18, le=100)
+    annual_income: float = Field(..., gt=0, description="INR per year")
+    sum_assured: float = Field(..., gt=0, description="INR policy cover amount")
 
+    height_cm: float = Field(..., ge=100, le=250)
+    weight_kg: float = Field(..., ge=20, le=250)
+
+    smoker: str = Field(..., description="yes or no")
+    alcohol_consumption: str = Field(..., description="none, occasional, or regular")
+    pre_existing_disease: str = Field(..., description="yes or no")
+    family_medical_history: str = Field(..., description="yes or no")
+    occupation: str = Field(..., description="office, field, or hazardous")
+
+    credit_score: int = Field(..., ge=300, le=900)
+    num_previous_claims: int = Field(..., ge=0)
+    years_with_insurer: int = Field(..., ge=0)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "age": 45, "annual_income": 800000, "sum_assured": 5000000,
+                "height_cm": 175, "weight_kg": 90,
+                "smoker": "yes", "alcohol_consumption": "occasional",
+                "pre_existing_disease": "no", "family_medical_history": "yes",
+                "occupation": "field",
+                "credit_score": 610, "num_previous_claims": 1, "years_with_insurer": 0,
+            }
+        }
 class RiskFactor(BaseModel):#another Pydantic model but its for response for not request
     feature: str #This stores which feature affected the decision. eg:smoker
     impact: str        # "increases_risk" | "reduces_risk"
