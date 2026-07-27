@@ -35,9 +35,10 @@ class UnderwritingModel:
         confidence=round(abs(proba_approve-0.5)*2*100,2)
 
         return {
-            "confidence": confidence,
+            "risk_confidence": confidence, 
             "risk_score": risk_score,
             "proba_approve": proba_approve,
+            "model_accuracy": self.meta.get("model_accuracy"),
         }
 underwriting_model = UnderwritingModel()
 """When Python executes this line:

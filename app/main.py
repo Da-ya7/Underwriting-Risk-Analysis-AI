@@ -57,12 +57,11 @@ def underwrite(proposal: ProposalRequest):#FastAPI automatically converts the in
         )
         summary = build_summary(
             result["risk_score"],
-            result["confidence"],
             risk_factors,
             positive_factors
         )
         return UnderwritingResponse(
-            confidence=result["confidence"],
+            confidence=result["risk_confidence"],
             risk_score=result["risk_score"],
             reasoning_summary=summary,
             risk_factors=risk_factors,
@@ -79,9 +78,9 @@ def underwrite_from_proposal(raw_proposal: RawProposalRequest):
 
         result = underwriting_model.predict(applicant)
         risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
-        summary = build_summary(result["risk_score"], result["confidence"], risk_factors, positive_factors)
+        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
         return UnderwritingResponse(
-            confidence=result["confidence"],
+            confidence=result["risk_confidence"],
             risk_score=result["risk_score"],
             reasoning_summary=summary,
             risk_factors=risk_factors,
@@ -104,7 +103,7 @@ def submit_proposal(payload: ClientProposalSubmit):
 
         result = underwriting_model.predict(applicant)
         risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
-        summary = build_summary(result["risk_score"], result["confidence"], risk_factors, positive_factors)
+        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
 
         risk_factors_json = json.dumps(risk_factors)
         positive_factors_json = json.dumps(positive_factors)
@@ -118,7 +117,7 @@ def submit_proposal(payload: ClientProposalSubmit):
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 full_name, insurance_type, json.dumps(raw),
-                result["confidence"], result["risk_score"],
+                result["risk_confidence"], result["risk_score"],
                 summary, risk_factors_json, positive_factors_json, "PENDING",
             ),
         )

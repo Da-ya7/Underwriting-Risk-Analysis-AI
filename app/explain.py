@@ -133,15 +133,17 @@ def build_explanation(applicant: dict, feature_meta: dict) -> tuple[list[dict], 
 converts them into human-readable explanations, and returns them to the API."""
 
 
-def build_summary(risk_score: float, confidence: float, risk_factors: list[dict], positive_factors: list[dict]) -> str:
+def get_risk_level(risk_score: float) -> str:
     if risk_score >= 60:
-        level = "High risk"
+        return "High"
     elif risk_score >= 35:
-        level = "Moderate risk"
-    else:
-        level = "Low risk"
+        return "Moderate"
+    return "Low"
 
-    lead = f"{level} profile (risk score {risk_score:.1f}/100), model confidence {confidence:.1f}%."
+
+def build_summary(risk_score: float, risk_factors: list[dict], positive_factors: list[dict]) -> str:
+    level = get_risk_level(risk_score)
+    lead = f"{level} risk profile (risk score {risk_score/10:.1f}/10)."
 
     if risk_factors:
         top_risk_names = ", ".join(r["feature"].replace("_", " ") for r in risk_factors[:3])
