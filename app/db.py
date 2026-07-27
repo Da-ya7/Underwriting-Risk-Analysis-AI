@@ -43,7 +43,6 @@ def init_db():
             full_name VARCHAR(255),
             insurance_type VARCHAR(50),
             raw_input JSON,
-            suggestion VARCHAR(50),
             confidence FLOAT,
             risk_score FLOAT,
             reasoning_summary TEXT,
@@ -64,3 +63,5 @@ if __name__ == "__main__":
         print("DB + table ready.")
     except Error as e:
         print("DB setup failed:", e)
+
+            

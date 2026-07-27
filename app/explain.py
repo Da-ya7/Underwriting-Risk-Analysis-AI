@@ -133,13 +133,15 @@ def build_explanation(applicant: dict, feature_meta: dict) -> tuple[list[dict], 
 converts them into human-readable explanations, and returns them to the API."""
 
 
-def build_summary(suggestion: str, confidence: float, risk_factors: list[dict], positive_factors: list[dict]) -> str:
-    if suggestion == "APPROVE":
-        lead = f"Model recommends APPROVAL with {confidence:.1f}% confidence."
-    elif suggestion == "REJECT":
-        lead = f"Model recommends REJECTION with {confidence:.1f}% confidence."
+def build_summary(risk_score: float, confidence: float, risk_factors: list[dict], positive_factors: list[dict]) -> str:
+    if risk_score >= 60:
+        level = "High risk"
+    elif risk_score >= 35:
+        level = "Moderate risk"
     else:
-        lead = f"Model confidence ({confidence:.1f}%) is too close to the decision boundary -> route to manual underwriter review."
+        level = "Low risk"
+
+    lead = f"{level} profile (risk score {risk_score:.1f}/100), model confidence {confidence:.1f}%."
 
     if risk_factors:
         top_risk_names = ", ".join(r["feature"].replace("_", " ") for r in risk_factors[:3])
@@ -148,5 +150,6 @@ def build_summary(suggestion: str, confidence: float, risk_factors: list[dict], 
         top_pos_names = ", ".join(p["feature"].replace("_", " ") for p in positive_factors[:2])
         lead += f" Offsetting positives: {top_pos_names}."
     return lead
-"""build_summary() creates a short,
-human-readable summary of the underwriting decision using the prediction, confidence, and the most important risk and positive factors."""
+"""build_summary() creates a short, human-readable risk analysis summary using the
+risk_score, confidence, and the most important risk and positive factors. No approve/
+reject decision is made here anymore -> that call is left entirely to the underwriter."""

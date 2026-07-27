@@ -103,7 +103,6 @@ class ProposalDetail(BaseModel):
     insurance_type: str
     status: str
     created_at: str
-    suggestion: str
     confidence: float
     risk_score: float
     reasoning_summary: str
@@ -128,12 +127,12 @@ class RiskFactor(BaseModel):#another Pydantic model but its for response for not
 }
 """
 class UnderwritingResponse(BaseModel):
-    suggestion: str                 # APPROVE | REJECT | REFER_FOR_MANUAL_REVIEW
-    confidence: float               # 0-100
+    confidence: float               # 0-100, how sure the model is about this risk read
     risk_score: float               # 0-100, higher = riskier
     reasoning_summary: str
     risk_factors: list[RiskFactor]
     positive_factors: list[RiskFactor]
+
 """Suppose the frontend asks:Should this policy be approved?
 
 Should the backend return only:

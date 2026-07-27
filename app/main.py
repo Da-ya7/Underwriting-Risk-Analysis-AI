@@ -56,13 +56,12 @@ def underwrite(proposal: ProposalRequest):#FastAPI automatically converts the in
             underwriting_model.meta
         )
         summary = build_summary(
-            result["suggestion"],
+            result["risk_score"],
             result["confidence"],
             risk_factors,
             positive_factors
         )
         return UnderwritingResponse(
-            suggestion=result["suggestion"],
             confidence=result["confidence"],
             risk_score=result["risk_score"],
             reasoning_summary=summary,
@@ -80,15 +79,13 @@ def underwrite_from_proposal(raw_proposal: RawProposalRequest):
 
         result = underwriting_model.predict(applicant)
         risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
-        summary = build_summary(result["suggestion"], result["confidence"], risk_factors, positive_factors)
-
+        summary = build_summary(result["risk_score"], result["confidence"], risk_factors, positive_factors)
         return UnderwritingResponse(
-            suggestion=result["suggestion"],
             confidence=result["confidence"],
             risk_score=result["risk_score"],
             reasoning_summary=summary,
             risk_factors=risk_factors,
-            positive_factors=positive_factors,
+            positive_factors=positive_factors,  
         )
     except KeyError as e:
         raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
@@ -107,7 +104,7 @@ def submit_proposal(payload: ClientProposalSubmit):
 
         result = underwriting_model.predict(applicant)
         risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
-        summary = build_summary(result["suggestion"], result["confidence"], risk_factors, positive_factors)
+        summary = build_summary(result["risk_score"], result["confidence"], risk_factors, positive_factors)
 
         risk_factors_json = json.dumps(risk_factors)
         positive_factors_json = json.dumps(positive_factors)
@@ -116,12 +113,12 @@ def submit_proposal(payload: ClientProposalSubmit):
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO proposals
-               (full_name, insurance_type, raw_input, suggestion, confidence, risk_score,
+               (full_name, insurance_type, raw_input, confidence, risk_score,
                 reasoning_summary, risk_factors, positive_factors, status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 full_name, insurance_type, json.dumps(raw),
-                result["suggestion"], result["confidence"], result["risk_score"],
+                result["confidence"], result["risk_score"],
                 summary, risk_factors_json, positive_factors_json, "PENDING",
             ),
         )
@@ -170,7 +167,6 @@ def get_proposal(proposal_id: int):
         insurance_type=row["insurance_type"],
         status=row["status"],
         created_at=str(row["created_at"]),
-        suggestion=row["suggestion"],
         confidence=row["confidence"],
         risk_score=row["risk_score"],
         reasoning_summary=row["reasoning_summary"],
