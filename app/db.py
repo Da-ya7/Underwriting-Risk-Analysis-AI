@@ -1,21 +1,25 @@
 """
 MySQL connection + table setup.
 
-Edit DB_CONFIG below with your local MySQL creds before running.
+Set creds in .env (copy .env.example -> .env, fill in).
 Run once: python -m app.db   (creates the database + table if missing)
 """
 
+import os
 import mysql.connector
 from mysql.connector import Error
+from dotenv import load_dotenv
+
+load_dotenv()
 
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "iambatman@12",   # <-- CHANGE THIS
-    "port": 3306,
-}   
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+}
 
-DB_NAME = "underwriting_ai"
+DB_NAME = os.getenv("DB_NAME", "underwriting_ai")
 
 
 def get_connection(with_db=True):
@@ -26,7 +30,6 @@ def get_connection(with_db=True):
 
 
 def init_db():
-    # create database if missing
     conn = get_connection(with_db=False)
     cur = conn.cursor()
     cur.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
@@ -34,7 +37,6 @@ def init_db():
     cur.close()
     conn.close()
 
-    # create table if missing
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -63,5 +65,3 @@ if __name__ == "__main__":
         print("DB + table ready.")
     except Error as e:
         print("DB setup failed:", e)
-
-            
