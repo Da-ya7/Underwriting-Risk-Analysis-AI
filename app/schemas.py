@@ -118,7 +118,7 @@ class RiskFactor(BaseModel):#another Pydantic model but its for response for not
     feature: str #This stores which feature affected the decision. eg:smoker
     impact: str        # "increases_risk" | "reduces_risk"
     detail: str #This is a human-readable explanation. ex:Applicant is a smoker
-
+    weight: float
 """
 {
     "feature": "smoker",

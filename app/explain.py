@@ -126,8 +126,8 @@ def build_explanation(applicant: dict, feature_meta: dict) -> tuple[list[dict], 
     scored_risk.sort(key=lambda x: x["weight"], reverse=True)
     scored_positive.sort(key=lambda x: x["weight"], reverse=True)
 
-    risk_factors = [{k: v for k, v in e.items() if k != "weight"} for e in scored_risk[:TOP_N]]
-    positive_factors = [{k: v for k, v in e.items() if k != "weight"} for e in scored_positive[:TOP_N]]
+    risk_factors = scored_risk[:TOP_N]
+    positive_factors = scored_positive[:TOP_N]
     return risk_factors, positive_factors
 """build_explanation() analyzes the applicant's data, identifies the most important risky and positive features, 
 converts them into human-readable explanations, and returns them to the API."""
