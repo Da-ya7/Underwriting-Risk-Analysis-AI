@@ -78,6 +78,43 @@ class RawProposalRequest(BaseModel):
                 "credit_score": 610, "num_previous_claims": 1, "years_with_insurer": 0,
             }
         }
+class ClientProposalSubmit(RawProposalRequest):
+    full_name: str = Field(..., description="Client's full name")
+    insurance_type: str = Field(..., description="Health / Life / Vehicle Insurance")
+
+
+class ProposalSubmitResponse(BaseModel):
+    id: int
+    status: str
+    message: str = "Proposal submitted successfully."
+
+
+class ProposalListItem(BaseModel):
+    id: int
+    full_name: str
+    insurance_type: str
+    status: str
+    created_at: str
+
+
+class ProposalDetail(BaseModel):
+    id: int
+    full_name: str
+    insurance_type: str
+    status: str
+    created_at: str
+    suggestion: str
+    confidence: float
+    risk_score: float
+    reasoning_summary: str
+    risk_factors: list
+    positive_factors: list
+
+
+class DecisionRequest(BaseModel):
+    status: str = Field(..., description="APPROVED or REJECTED")
+
+
 class RiskFactor(BaseModel):#another Pydantic model but its for response for not request
     feature: str #This stores which feature affected the decision. eg:smoker
     impact: str        # "increases_risk" | "reduces_risk"
