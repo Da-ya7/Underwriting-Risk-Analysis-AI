@@ -2,6 +2,7 @@ import json
 
 from fastapi import FastAPI,HTTPException #The main class used to create a FastAPI web application.
 from fastapi.middleware.cors import CORSMiddleware #Used to return an HTTP error response to the client.
+from .document_validation.router import router as document_validation_router
 
 from .schemas import (
     ProposalRequest, RawProposalRequest, UnderwritingResponse,
@@ -25,6 +26,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(document_validation_router)
 #add_middleware() registers middleware with the FastAPI application. Middleware executes before and/or after every incoming request.
 #CORSMiddleware is middleware that controls Cross-Origin Resource Sharing (CORS) by determining which origins are permitted to access your API.(check which website are u from)
 #allow_origin - decides who can enter the web ..here *-all
