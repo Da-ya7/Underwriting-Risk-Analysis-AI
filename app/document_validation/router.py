@@ -3,13 +3,18 @@ import cv2
 import numpy as np
 import pytesseract
 
-from .llm_extract import extract_fields
-from .validator import validate_all
+from .parser import extract_fields
+from .validator import validate_against_form
 
 router = APIRouter()
 
+
 @router.post("/api/v1/validate-certificate")
-async def validate_certificate(file: UploadFile = File(...), stated_category: str = Form(None)):
+async def validate_certificate(
+    file: UploadFile = File(...),
+    full_name: str = Form(None),
+    age: int = Form(None),
+):
     contents = await file.read()
     npimg = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
@@ -19,7 +24,14 @@ async def validate_certificate(file: UploadFile = File(...), stated_category: st
     ocr_text = pytesseract.image_to_string(thresh)
 
     fields = extract_fields(ocr_text)
-    validation_results = validate_all(fields, stated_category=stated_category)
+
+    form_data = {}
+    if full_name is not None:
+        form_data["full_name"] = full_name
+    if age is not None:
+        form_data["age"] = age
+
+    validation_results = validate_against_form(fields, form_data)
 
     return {
         "ocr_raw_text": ocr_text,

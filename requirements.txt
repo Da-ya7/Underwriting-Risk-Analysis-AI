@@ -9,6 +9,5 @@ mysql-connector-python==9.0.0
 python-dotenv==1.0.1
 opencv-python-headless
 pytesseract
-groq
 python-dotenv
 python-multipart
