@@ -14,18 +14,18 @@
     "years_with_insurer"
   ],
   "importances": {
-    "age": 0.085,
-    "annual_income": 0.1073,
-    "sum_assured": 0.1,
-    "bmi": 0.0991,
-    "smoker": 0.1001,
-    "alcohol_consumption": 0.0406,
-    "pre_existing_disease": 0.0448,
-    "family_medical_history": 0.025,
-    "occupation_risk": 0.0442,
-    "credit_score": 0.2416,
-    "num_previous_claims": 0.0395,
-    "years_with_insurer": 0.0729
+    "age": 0.0876,
+    "annual_income": 0.1503,
+    "sum_assured": 0.119,
+    "bmi": 0.1005,
+    "smoker": 0.1036,
+    "alcohol_consumption": 0.0408,
+    "pre_existing_disease": 0.0471,
+    "family_medical_history": 0.0249,
+    "occupation_risk": 0.0468,
+    "credit_score": 0.1579,
+    "num_previous_claims": 0.039,
+    "years_with_insurer": 0.0825
   },
   "direction": {
     "age": 1,
