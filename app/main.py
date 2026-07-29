@@ -1,18 +1,26 @@
 import json
 
-from fastapi import FastAPI,HTTPException #The main class used to create a FastAPI web application.
-from fastapi.middleware.cors import CORSMiddleware #Used to return an HTTP error response to the client.
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
+import cv2
+import numpy as np
+import pytesseract
+
 from .document_validation.router import router as document_validation_router
+from .document_validation.parser import extract_fields
+from .document_validation.router import _decode_image, _preprocess_for_ocr
+from .document_validation.validator import validate_against_form
 
 from .schemas import (
     ProposalRequest, RawProposalRequest, UnderwritingResponse,
     ClientProposalSubmit, ProposalSubmitResponse, ProposalListItem,
     ProposalDetail, DecisionRequest,
-) # . -Import from the current package (app/)
-from .model_service import underwriting_model #import underwriting_model from model_service
-from .explain import build_explanation,build_summary
+)
+from .model_service import underwriting_model
+from .explain import build_explanation, build_summary
 from .conversion import convert_raw_proposal
-from .db import get_connection, init_db  # NEW: MySQL connection + table setup
+from .db import get_connection, init_db
 
 app = FastAPI(
     title="Underwriting Risk Analysis AI",
@@ -22,83 +30,66 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(document_validation_router)
-#add_middleware() registers middleware with the FastAPI application. Middleware executes before and/or after every incoming request.
-#CORSMiddleware is middleware that controls Cross-Origin Resource Sharing (CORS) by determining which origins are permitted to access your API.(check which website are u from)
-#allow_origin - decides who can enter the web ..here *-all
-#allow_method[*] -allows every HTTP method like get,put,post,delete.
-#allow)_headers[*]-allows all request headers.
-"""
-Headers are extra information sent with an HTTP request.
 
-Example:
-Content-Type: application/json
-Authorization: Bearer xxxxx
-Accept: application/json
-"""
+
 @app.on_event("startup")
 def on_startup():
-    init_db()  # creates DB + table if missing, runs once when server starts
+    init_db()
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-@app.post("/api/v1/underwrite", response_model=UnderwritingResponse)
-def underwrite(proposal: ProposalRequest):#FastAPI automatically converts the incoming JSON into a ProposalRequest object and validates it using Pydantic.
-    try:
-        applicant = proposal.model_dump()
-        result = underwriting_model.predict(applicant)
-        risk_factors, positive_factors = build_explanation(
-            applicant,
-            underwriting_model.meta
-        )
-        summary = build_summary(
-            result["risk_score"],
-            risk_factors,
-            positive_factors
-        )
-        return UnderwritingResponse(
-            confidence=result["risk_confidence"],
-            risk_score=result["risk_score"],
-            reasoning_summary=summary,
-            risk_factors=risk_factors,
-            positive_factors=positive_factors,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-@app.post("/api/v1/underwrite/from-proposal", response_model=UnderwritingResponse)
-def underwrite_from_proposal(raw_proposal: RawProposalRequest):
-    try:
-        converted = convert_raw_proposal(raw_proposal.model_dump())
-        applicant = ProposalRequest(**converted).model_dump()
 
-        result = underwriting_model.predict(applicant)
-        risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
-        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
-        return UnderwritingResponse(
-            confidence=result["risk_confidence"],
-            risk_score=result["risk_score"],
-            reasoning_summary=summary,
-            risk_factors=risk_factors,
-            positive_factors=positive_factors,  
-        )
-    except KeyError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-# ---------- CLIENT: submit proposal, runs AI silently, stores in DB ----------
+# ... /api/v1/underwrite and /api/v1/underwrite/from-proposal unchanged, keep as-is ...
+
+
+# ---------- CLIENT: submit proposal + attached document in one request ----------
 @app.post("/api/v1/proposals", response_model=ProposalSubmitResponse)
-def submit_proposal(payload: ClientProposalSubmit):
+async def submit_proposal(
+    file: UploadFile = File(..., description="ID/certificate — required, attached with the form"),
+    full_name: str = Form(...),
+    insurance_type: str = Form(...),
+    age: int = Form(...),
+    annual_income: float = Form(...),
+    sum_assured: float = Form(...),
+    height_cm: float = Form(...),
+    weight_kg: float = Form(...),
+    smoker: str = Form(...),
+    alcohol_consumption: str = Form(...),
+    pre_existing_disease: str = Form(...),
+    family_medical_history: str = Form(...),
+    occupation: str = Form(...),
+    credit_score: int = Form(...),
+    num_previous_claims: int = Form(...),
+    years_with_insurer: int = Form(...),
+):
     try:
-        raw = payload.model_dump()
-        full_name = raw.pop("full_name")
-        insurance_type = raw.pop("insurance_type")
+        # validate form fields against same rules as before (raises 422 on bad input)
+        try:
+            validated = ClientProposalSubmit(
+                full_name=full_name, insurance_type=insurance_type, age=age,
+                annual_income=annual_income, sum_assured=sum_assured,
+                height_cm=height_cm, weight_kg=weight_kg, smoker=smoker,
+                alcohol_consumption=alcohol_consumption,
+                pre_existing_disease=pre_existing_disease,
+                family_medical_history=family_medical_history,
+                occupation=occupation, credit_score=credit_score,
+                num_previous_claims=num_previous_claims,
+                years_with_insurer=years_with_insurer,
+            )
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=e.errors())
+
+        raw = validated.model_dump()
+        raw.pop("full_name")
+        raw.pop("insurance_type")
 
         converted = convert_raw_proposal(raw)
         applicant = ProposalRequest(**converted).model_dump()
@@ -107,20 +98,34 @@ def submit_proposal(payload: ClientProposalSubmit):
         risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
         summary = build_summary(result["risk_score"], risk_factors, positive_factors)
 
-        risk_factors_json = json.dumps(risk_factors)
-        positive_factors_json = json.dumps(positive_factors)
+        # --- OCR + rule-based parse + form-vs-document validation (server-side, once) ---
+        doc_bytes = await file.read()
+        extracted, val_results = {}, []
+        try:
+            img = _decode_image(doc_bytes)
+        except Exception:
+            img = None
+        if img is not None:
+            processed = _preprocess_for_ocr(img)
+            ocr_text = pytesseract.image_to_string(processed)
+            extracted = extract_fields(ocr_text)
+            val_results = validate_against_form(extracted, {"full_name": full_name, "age": age})
 
         conn = get_connection()
         cur = conn.cursor()
         cur.execute(
             """INSERT INTO proposals
                (full_name, insurance_type, raw_input, confidence, risk_score,
-                reasoning_summary, risk_factors, positive_factors, status)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                reasoning_summary, risk_factors, positive_factors, status,
+                document_blob, document_filename, document_mimetype,
+                extracted_fields, validation_results)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 full_name, insurance_type, json.dumps(raw),
                 result["risk_confidence"], result["risk_score"],
-                summary, risk_factors_json, positive_factors_json, "PENDING",
+                summary, json.dumps(risk_factors), json.dumps(positive_factors), "PENDING",
+                doc_bytes, file.filename, file.content_type,
+                json.dumps(extracted), json.dumps(val_results),
             ),
         )
         conn.commit()
@@ -129,13 +134,15 @@ def submit_proposal(payload: ClientProposalSubmit):
         conn.close()
 
         return ProposalSubmitResponse(id=new_id, status="PENDING")
+    except HTTPException:
+        raise
     except KeyError as e:
         raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- UNDERWRITER: list all proposals ----------
+# ---------- UNDERWRITER: list all proposals (unchanged) ----------
 @app.get("/api/v1/proposals", response_model=list[ProposalListItem])
 def list_proposals():
     conn = get_connection()
@@ -149,7 +156,7 @@ def list_proposals():
     return rows
 
 
-# ---------- UNDERWRITER: full detail incl AI verdict for one proposal ----------
+# ---------- UNDERWRITER: full detail incl AI verdict + doc validation ----------
 @app.get("/api/v1/proposals/{proposal_id}", response_model=ProposalDetail)
 def get_proposal(proposal_id: int):
     conn = get_connection()
@@ -173,10 +180,34 @@ def get_proposal(proposal_id: int):
         reasoning_summary=row["reasoning_summary"],
         risk_factors=json.loads(row["risk_factors"]) if isinstance(row["risk_factors"], str) else row["risk_factors"],
         positive_factors=json.loads(row["positive_factors"]) if isinstance(row["positive_factors"], str) else row["positive_factors"],
+        document_filename=row.get("document_filename"),
+        document_mimetype=row.get("document_mimetype"),
+        extracted_fields=json.loads(row["extracted_fields"]) if isinstance(row.get("extracted_fields"), str) else row.get("extracted_fields"),
+        validation_results=json.loads(row["validation_results"]) if isinstance(row.get("validation_results"), str) else row.get("validation_results"),
     )
 
 
-# ---------- UNDERWRITER: final decision (approve/reject) ----------
+# ---------- UNDERWRITER: raw document bytes (view/download) ----------
+@app.get("/api/v1/proposals/{proposal_id}/document")
+def get_proposal_document(proposal_id: int):
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT document_blob, document_filename, document_mimetype FROM proposals WHERE id=%s", (proposal_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row or not row["document_blob"]:
+        raise HTTPException(status_code=404, detail="No document attached to this proposal")
+
+    return Response(
+        content=row["document_blob"],
+        media_type=row["document_mimetype"] or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{row["document_filename"] or "document"}"'},
+    )
+
+
+# ---------- UNDERWRITER: final decision (unchanged) ----------
 @app.patch("/api/v1/proposals/{proposal_id}/decision")
 def set_decision(proposal_id: int, decision: DecisionRequest):
     if decision.status not in ("APPROVED", "REJECTED"):

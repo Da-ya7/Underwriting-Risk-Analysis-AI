@@ -29,6 +29,18 @@ def get_connection(with_db=True):
     return mysql.connector.connect(**cfg)
 
 
+def _add_column_if_missing(cur, table, col_def):
+    """col_def e.g. 'document_blob LONGBLOB'. Ignores 'duplicate column' error
+    so this is safe to re-run on a DB that already has the column (existing
+    installs won't have these new columns until this runs once)."""
+    col_name = col_def.split()[0]
+    try:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    except Error as e:
+        if e.errno != 1060:  # 1060 = Duplicate column name
+            raise
+
+
 def init_db():
     conn = get_connection(with_db=False)
     cur = conn.cursor()
@@ -55,6 +67,16 @@ def init_db():
         )
     """)
     conn.commit()
+
+    # NEW: document storage + doc-validation columns (migration-safe for
+    # existing tables created before this change)
+    _add_column_if_missing(cur, "proposals", "document_blob LONGBLOB")
+    _add_column_if_missing(cur, "proposals", "document_filename VARCHAR(255)")
+    _add_column_if_missing(cur, "proposals", "document_mimetype VARCHAR(100)")
+    _add_column_if_missing(cur, "proposals", "extracted_fields JSON")
+    _add_column_if_missing(cur, "proposals", "validation_results JSON")
+    conn.commit()
+
     cur.close()
     conn.close()
 

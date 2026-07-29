@@ -108,6 +108,10 @@ class ProposalDetail(BaseModel):
     reasoning_summary: str
     risk_factors: list
     positive_factors: list
+    document_filename: str | None = None
+    document_mimetype: str | None = None
+    extracted_fields: dict | None = None
+    validation_results: list | None = None
 
 
 class DecisionRequest(BaseModel):

@@ -56,8 +56,19 @@ def validate_name(form_name: str, doc_name: str, threshold: float = 0.8):
 
 def validate_age(form_age, doc_dob: str, tolerance_years: int = 1):
     computed_age = calc_age(doc_dob)
+
     if computed_age is None:
         return {"field": "age", "valid": False, "reason": "DOB not found or unreadable in document"}
+
+    if computed_age < 0 or computed_age > 120:
+        return {
+            "field": "age",
+            "document_computed_age": computed_age,
+            "document_dob": doc_dob,
+            "valid": False,
+            "reason": f"Extracted DOB gives an implausible age ({computed_age}) — likely OCR misread, re-scan document",
+        }
+
     if form_age is None:
         return {"field": "age", "valid": False, "reason": "Age not provided in form"}
 
