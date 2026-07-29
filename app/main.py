@@ -8,7 +8,7 @@ import numpy as np
 import pytesseract
 
 from .document_validation.router import router as document_validation_router
-from .document_validation.parser import extract_fields
+from .document_validation.llm_extract import extract_fields
 from .document_validation.router import _decode_image, _preprocess_for_ocr
 from .document_validation.validator import validate_against_form
 
@@ -107,7 +107,16 @@ async def submit_proposal(
             img = None
         if img is not None:
             processed = _preprocess_for_ocr(img)
-            ocr_text = pytesseract.image_to_string(processed)
+            ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
+            ocr_text_regional = ""
+            try:
+                ocr_text_regional = pytesseract.image_to_string(processed, lang="eng+tam+hin+ben")
+            except pytesseract.TesseractError:
+                pass
+            ocr_text = (
+                "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
+                "\n--- OCR PASS 2 (English + regional scripts) ---\n" + ocr_text_regional
+            )
             extracted = extract_fields(ocr_text)
             val_results = validate_against_form(extracted, {"full_name": full_name, "age": age})
 

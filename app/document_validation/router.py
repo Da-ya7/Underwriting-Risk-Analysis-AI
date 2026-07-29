@@ -5,7 +5,7 @@ from PIL import Image
 import io
 import pytesseract
 
-from .parser import extract_fields
+from .llm_extract import extract_fields
 from .validator import validate_against_form
 
 router = APIRouter()
@@ -52,7 +52,18 @@ async def validate_certificate(
         raise HTTPException(status_code=422, detail="Could not decode uploaded image")
 
     processed = _preprocess_for_ocr(img)
-    ocr_text = pytesseract.image_to_string(processed)
+    ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
+
+    ocr_text_regional = ""
+    try:
+        ocr_text_regional = pytesseract.image_to_string(processed, lang="eng+tam+hin+ben")
+    except pytesseract.TesseractError:
+        pass  # regional language packs not installed -> just use English pass
+
+    ocr_text = (
+        "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
+        "\n--- OCR PASS 2 (English + regional scripts) ---\n" + ocr_text_regional
+    )
 
     fields = extract_fields(ocr_text)
 

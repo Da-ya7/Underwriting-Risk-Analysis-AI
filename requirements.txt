@@ -12,3 +12,5 @@ pytesseract
 python-dotenv
 python-multipart
 Pillow
+groq
+python-dotenv
