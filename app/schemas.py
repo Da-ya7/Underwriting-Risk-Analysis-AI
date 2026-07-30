@@ -112,6 +112,21 @@ class ProposalDetail(BaseModel):
     document_mimetype: str | None = None
     extracted_fields: dict | None = None
     validation_results: list | None = None
+    # NEW: applicant's raw submitted details, for the underwriter's client-info view
+    age: int
+    annual_income: float
+    sum_assured: float
+    bmi: float
+    height: float
+    weight: float
+    smoker: str
+    alcohol_consumption: str
+    pre_existing_disease: str
+    family_medical_history: str
+    occupation: str
+    credit_score: int
+    num_previous_claims: int
+    years_with_insurer: int
 
 
 class DecisionRequest(BaseModel):

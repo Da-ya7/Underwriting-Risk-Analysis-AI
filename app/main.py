@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import pytesseract
 
+from .conversion import convert_raw_proposal, calculate_bmi
 from .document_validation.router import router as document_validation_router
 from .document_validation.llm_extract import extract_fields
 from .document_validation.router import _decode_image, _preprocess_for_ocr
@@ -178,6 +179,8 @@ def get_proposal(proposal_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Proposal not found")
 
+    raw = json.loads(row["raw_input"]) if isinstance(row["raw_input"], str) else row["raw_input"]
+
     return ProposalDetail(
         id=row["id"],
         full_name=row["full_name"],
@@ -193,6 +196,20 @@ def get_proposal(proposal_id: int):
         document_mimetype=row.get("document_mimetype"),
         extracted_fields=json.loads(row["extracted_fields"]) if isinstance(row.get("extracted_fields"), str) else row.get("extracted_fields"),
         validation_results=json.loads(row["validation_results"]) if isinstance(row.get("validation_results"), str) else row.get("validation_results"),
+        age=raw["age"],
+        annual_income=raw["annual_income"],
+        sum_assured=raw["sum_assured"],
+        height=raw["height_cm"],
+        weight=raw["weight_kg"],
+        bmi=calculate_bmi(raw["height_cm"], raw["weight_kg"]),
+        smoker=raw["smoker"],
+        alcohol_consumption=raw["alcohol_consumption"],
+        pre_existing_disease=raw["pre_existing_disease"],
+        family_medical_history=raw["family_medical_history"],
+        occupation=raw["occupation"],
+        credit_score=raw["credit_score"],
+        num_previous_claims=raw["num_previous_claims"],
+        years_with_insurer=raw["years_with_insurer"],
     )
 
 
