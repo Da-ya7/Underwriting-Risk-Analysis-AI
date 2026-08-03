@@ -1,0 +1,16 @@
+{
+  "country_code": "ZA",
+  "doc_type": "smart_id",
+  "doc_name": "South Africa Smart ID Card",
+  "language": "eng",
+  "script_direction": "ltr",
+  "date_format": "YYYY-MM-DD",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^\\d{13}$"},
+    "address": {"required": false},
+    "expiry_date": {"required": false},
+    "issue_date": {"required": false}
+  }
+}

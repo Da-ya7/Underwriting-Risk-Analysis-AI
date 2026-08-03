@@ -7,6 +7,7 @@ import pytesseract
 
 from .llm_extract import extract_fields
 from .validator import validate_against_form
+from .schema_loader import load_schema, SchemaNotFoundError, list_supported_docs
 
 router = APIRouter()
 
@@ -29,8 +30,18 @@ def _preprocess_for_ocr(img):
         scale = 1500 / max(h, w)
         gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-    thresh = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15
+    # Bilateral filter smooths background texture/watermarks (common on ID
+    # cards) while preserving text edges — much safer than CLAHE here, since
+    # CLAHE amplifies background patterns into noise just as much as it
+    # amplifies faint text.
+    denoised = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
+
+    # Otsu picks a global threshold automatically based on the image's own
+    # histogram — more robust than a fixed adaptive block size when the
+    # background has printed patterns (emblems, watermarks) competing with
+    # low-contrast text.
+    _, thresh = cv2.threshold(
+        denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
     return thresh
 
@@ -40,7 +51,14 @@ async def validate_certificate(
     file: UploadFile = File(...),
     full_name: str = Form(None),
     age: int = Form(None),
+    country_code: str = Form("IN"),   # default IN -> old behavior unchanged if not passed
+    doc_type: str = Form("aadhaar"),
 ):
+    try:
+        schema = load_schema(country_code, doc_type)
+    except SchemaNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     contents = await file.read()
 
     try:
@@ -55,17 +73,19 @@ async def validate_certificate(
     ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
 
     ocr_text_regional = ""
-    try:
-        ocr_text_regional = pytesseract.image_to_string(processed, lang="eng+tam+hin+ben")
-    except pytesseract.TesseractError:
-        pass  # regional language packs not installed -> just use English pass
+    schema_lang = schema.get("language", "eng")
+    if schema_lang != "eng":
+        try:
+            ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang)
+        except pytesseract.TesseractError:
+            pass  # lang pack not installed -> just use English pass
 
     ocr_text = (
         "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
-        "\n--- OCR PASS 2 (English + regional scripts) ---\n" + ocr_text_regional
+        f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
     )
 
-    fields = extract_fields(ocr_text)
+    fields = extract_fields(ocr_text, schema)
 
     form_data = {}
     if full_name is not None:
@@ -73,10 +93,16 @@ async def validate_certificate(
     if age is not None:
         form_data["age"] = age
 
-    validation_results = validate_against_form(fields, form_data)
+    validation_results = validate_against_form(fields, form_data, schema)
 
     return {
+        "schema_used": schema["doc_name"],
         "ocr_raw_text": ocr_text,
         "extracted_fields": fields,
         "validation_results": validation_results,
     }
+
+
+@router.get("/api/v1/supported-documents")
+async def supported_documents():
+    return {"documents": list_supported_docs()}

@@ -1,0 +1,16 @@
+{
+  "country_code": "NG",
+  "doc_type": "nin",
+  "doc_name": "Nigeria National ID (NIN)",
+  "language": "eng",
+  "script_direction": "ltr",
+  "date_format": "DD-MM-YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^\\d{11}$"},
+    "address": {"required": false},
+    "expiry_date": {"required": false},
+    "issue_date": {"required": false}
+  }
+}

@@ -112,6 +112,10 @@ class ProposalDetail(BaseModel):
     document_mimetype: str | None = None
     extracted_fields: dict | None = None
     validation_results: list | None = None
+    # Multi-country ID support: which country/doc schema was matched for this proposal
+    country_code: str | None = None
+    doc_type: str | None = None
+    schema_used: str | None = None
     # NEW: applicant's raw submitted details, for the underwriter's client-info view
     age: int
     annual_income: float

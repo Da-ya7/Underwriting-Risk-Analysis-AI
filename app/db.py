@@ -30,18 +30,20 @@ def get_connection(with_db=True):
 
 
 def _add_column_if_missing(cur, table, col_def):
-    """col_def e.g. 'document_blob LONGBLOB'. Ignores 'duplicate column' error
-    so this is safe to re-run on a DB that already has the column (existing
-    installs won't have these new columns until this runs once)."""
-    col_name = col_def.split()[0]
+    """
+    col_def example: 'document_blob LONGBLOB'.
+
+    Safe to re-run. Ignores duplicate column errors.
+    """
     try:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
     except Error as e:
-        if e.errno != 1060:  # 1060 = Duplicate column name
+        if e.errno != 1060:  # Duplicate column
             raise
 
 
 def init_db():
+    # Create database if missing
     conn = get_connection(with_db=False)
     cur = conn.cursor()
     cur.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
@@ -49,32 +51,43 @@ def init_db():
     cur.close()
     conn.close()
 
+    # Create table if missing
     conn = get_connection()
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS proposals (
             id INT AUTO_INCREMENT PRIMARY KEY,
             full_name VARCHAR(255),
             insurance_type VARCHAR(50),
+
+            country_code VARCHAR(5) DEFAULT 'IN',
+            doc_type VARCHAR(30) DEFAULT 'aadhaar',
+
             raw_input JSON,
             confidence FLOAT,
             risk_score FLOAT,
             reasoning_summary TEXT,
             risk_factors JSON,
             positive_factors JSON,
+
             status VARCHAR(30) DEFAULT 'PENDING',
+
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
 
-    # NEW: document storage + doc-validation columns (migration-safe for
-    # existing tables created before this change)
+    # Migration-safe additions for older databases
+    _add_column_if_missing(cur, "proposals", "country_code VARCHAR(5) DEFAULT 'IN'")
+    _add_column_if_missing(cur, "proposals", "doc_type VARCHAR(30) DEFAULT 'aadhaar'")
+
     _add_column_if_missing(cur, "proposals", "document_blob LONGBLOB")
     _add_column_if_missing(cur, "proposals", "document_filename VARCHAR(255)")
     _add_column_if_missing(cur, "proposals", "document_mimetype VARCHAR(100)")
     _add_column_if_missing(cur, "proposals", "extracted_fields JSON")
     _add_column_if_missing(cur, "proposals", "validation_results JSON")
+
     conn.commit()
 
     cur.close()

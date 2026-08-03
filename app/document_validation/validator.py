@@ -1,19 +1,33 @@
 """
 Cross-validation: document extracted fields vs client-submitted form data.
-
-No document-internal validation here (no age-category check, no expiry check
-in isolation). The only question this module answers: does what's in the
-document match what the client typed in the form?
+Schema-aware — only validates fields the selected doc type actually has.
 """
 
 from datetime import date
 import re
 import difflib
 
+_MONTHS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
 
 def calc_age(dob_str: str):
     if not dob_str:
         return None
+
+    # Numeric formats: 04/05/2001, 04-05-2001, 04.05.2001
     full_match = re.search(r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', dob_str)
     if full_match:
         d, m, y = map(int, full_match.groups())
@@ -24,6 +38,31 @@ def calc_age(dob_str: str):
         today = date.today()
         return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
 
+    # Textual-month formats: "04 MAY 2001", "4 May 2001", "May 4 2001"
+    text_match = re.search(
+        r'(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})',
+        dob_str,
+    ) or re.search(
+        r'([A-Za-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})',
+        dob_str,
+    )
+    if text_match:
+        groups = text_match.groups()
+        # figure out which group is the month name
+        if groups[0].isalpha():
+            month_name, d, y = groups
+        else:
+            d, month_name, y = groups
+        month = _MONTHS.get(month_name.strip().lower())
+        if month:
+            try:
+                dob = date(int(y), month, int(d))
+            except ValueError:
+                return None
+            today = date.today()
+            return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+    # Fallback: just a bare year somewhere in the string
     year_match = re.search(r'(19|20)\d{2}', dob_str)
     if year_match:
         return date.today().year - int(year_match.group())
@@ -89,17 +128,46 @@ def validate_age(form_age, doc_dob: str, tolerance_years: int = 1):
     }
 
 
-def validate_against_form(extracted_fields: dict, form_data: dict) -> list:
+def validate_id_number(id_number: str, schema: dict):
+    id_field_config = schema.get("fields", {}).get("id_number", {})
+    pattern = id_field_config.get("regex")
+
+    if not id_number:
+        return {"field": "id_number", "valid": False, "reason": "ID number not found in document"}
+    if not pattern:
+        return {"field": "id_number", "valid": True, "reason": "No format rule defined for this doc type — skipped"}
+
+    # Normalize whitespace only — some docs print id numbers in space-separated
+    # groups (e.g. "4278 325 3468") even though the canonical format has none.
+    # Dashes are left alone since some schemas (e.g. UAE Emirates ID) require
+    # them literally as part of the pattern.
+    cleaned = re.sub(r'\s+', '', id_number.strip())
+
+    valid = bool(re.match(pattern, cleaned)) or bool(re.match(pattern, id_number.strip()))
+    return {
+        "field": "id_number",
+        "document_value": id_number,
+        "valid": valid,
+        "reason": None if valid else f"ID number format does not match expected pattern for {schema['doc_name']}",
+    }
+
+
+def validate_against_form(extracted_fields: dict, form_data: dict, schema: dict) -> list:
     """
-    extracted_fields: output of parser.extract_fields()
+    extracted_fields: output of extract_fields()
     form_data: dict submitted by client, e.g. {"full_name": "...", "age": 20}
+    schema: loaded id schema config — determines which checks run
     """
     results = []
+    schema_fields = schema.get("fields", {})
 
-    if "full_name" in form_data:
+    if "full_name" in form_data and "name" in schema_fields:
         results.append(validate_name(form_data.get("full_name"), extracted_fields.get("name")))
 
-    if "age" in form_data:
+    if "age" in form_data and "dob" in schema_fields:
         results.append(validate_age(form_data.get("age"), extracted_fields.get("dob")))
+
+    if "id_number" in schema_fields:
+        results.append(validate_id_number(extracted_fields.get("id_number"), schema))
 
     return results

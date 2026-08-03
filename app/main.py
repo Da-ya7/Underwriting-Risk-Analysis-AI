@@ -12,6 +12,7 @@ from .document_validation.router import router as document_validation_router
 from .document_validation.llm_extract import extract_fields
 from .document_validation.router import _decode_image, _preprocess_for_ocr
 from .document_validation.validator import validate_against_form
+from .document_validation.schema_loader import load_schema, SchemaNotFoundError
 
 from .schemas import (
     ProposalRequest, RawProposalRequest, UnderwritingResponse,
@@ -70,6 +71,10 @@ async def submit_proposal(
     credit_score: int = Form(...),
     num_previous_claims: int = Form(...),
     years_with_insurer: int = Form(...),
+    # Multi-country ID support: which schema to validate the attached doc against.
+    # Defaults keep old callers (India/Aadhaar) working unchanged.
+    country_code: str = Form("IN"),
+    doc_type: str = Form("aadhaar"),
 ):
     try:
         # validate form fields against same rules as before (raises 422 on bad input)
@@ -87,6 +92,13 @@ async def submit_proposal(
             )
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=e.errors())
+
+        # Multi-country ID support: resolve schema up front so a bad country/doc
+        # combo fails fast with a clear 400, before any OCR work happens.
+        try:
+            schema = load_schema(country_code, doc_type)
+        except SchemaNotFoundError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         raw = validated.model_dump()
         raw.pop("full_name")
@@ -110,16 +122,23 @@ async def submit_proposal(
             processed = _preprocess_for_ocr(img)
             ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
             ocr_text_regional = ""
-            try:
-                ocr_text_regional = pytesseract.image_to_string(processed, lang="eng+tam+hin+ben")
-            except pytesseract.TesseractError:
-                pass
+            schema_lang = schema.get("language", "eng")
+            if schema_lang != "eng":
+                try:
+                    ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang)
+                except pytesseract.TesseractError:
+                    pass  # lang pack not installed -> just use English pass
             ocr_text = (
                 "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
-                "\n--- OCR PASS 2 (English + regional scripts) ---\n" + ocr_text_regional
+                f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
             )
-            extracted = extract_fields(ocr_text)
-            val_results = validate_against_form(extracted, {"full_name": full_name, "age": age})
+            print("---- OCR TEXT START ----")
+            print(ocr_text)
+            print("---- OCR TEXT END ----")
+            extracted = extract_fields(ocr_text, schema)
+            val_results = validate_against_form(
+                extracted, {"full_name": full_name, "age": age}, schema
+            )
 
         conn = get_connection()
         cur = conn.cursor()
@@ -128,14 +147,15 @@ async def submit_proposal(
                (full_name, insurance_type, raw_input, confidence, risk_score,
                 reasoning_summary, risk_factors, positive_factors, status,
                 document_blob, document_filename, document_mimetype,
-                extracted_fields, validation_results)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                extracted_fields, validation_results, country_code, doc_type)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 full_name, insurance_type, json.dumps(raw),
                 result["risk_confidence"], result["risk_score"],
                 summary, json.dumps(risk_factors), json.dumps(positive_factors), "PENDING",
                 doc_bytes, file.filename, file.content_type,
                 json.dumps(extracted), json.dumps(val_results),
+                country_code, doc_type,
             ),
         )
         conn.commit()
@@ -181,6 +201,17 @@ def get_proposal(proposal_id: int):
 
     raw = json.loads(row["raw_input"]) if isinstance(row["raw_input"], str) else row["raw_input"]
 
+    # Multi-country ID support: re-resolve schema_used for display.
+    # Old rows default to IN/aadhaar via DB column defaults.
+    row_country_code = row.get("country_code") or "IN"
+    row_doc_type = row.get("doc_type") or "aadhaar"
+    schema_used = None
+    try:
+        matched_schema = load_schema(row_country_code, row_doc_type)
+        schema_used = matched_schema["doc_name"]
+    except SchemaNotFoundError:
+        schema_used = None
+
     return ProposalDetail(
         id=row["id"],
         full_name=row["full_name"],
@@ -196,6 +227,9 @@ def get_proposal(proposal_id: int):
         document_mimetype=row.get("document_mimetype"),
         extracted_fields=json.loads(row["extracted_fields"]) if isinstance(row.get("extracted_fields"), str) else row.get("extracted_fields"),
         validation_results=json.loads(row["validation_results"]) if isinstance(row.get("validation_results"), str) else row.get("validation_results"),
+        country_code=row_country_code,
+        doc_type=row_doc_type,
+        schema_used=schema_used,
         age=raw["age"],
         annual_income=raw["annual_income"],
         sum_assured=raw["sum_assured"],

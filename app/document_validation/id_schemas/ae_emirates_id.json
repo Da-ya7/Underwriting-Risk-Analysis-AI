@@ -1,0 +1,16 @@
+{
+  "country_code": "AE",
+  "doc_type": "emirates_id",
+  "doc_name": "UAE Emirates ID",
+  "language": "eng+ara",
+  "script_direction": "rtl",
+  "date_format": "DD/MM/YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^784-\\d{4}-\\d{7}-\\d{1}$"},
+    "expiry_date": {"required": true},
+    "issue_date": {"required": false},
+    "address": {"required": false}
+  }
+}

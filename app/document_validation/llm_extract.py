@@ -6,37 +6,46 @@ from groq import Groq
 load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-SYSTEM_PROMPT = """You are a strict document field extraction engine. You extract ONLY information that is explicitly present in the given OCR text. You never guess, infer, or generate plausible-sounding values.
+
+def _build_system_prompt(schema: dict) -> str:
+    field_names = list(schema["fields"].keys())
+    field_lines = "\n".join(f"- {f}" for f in field_names)
+    schema_json_keys = ", ".join(f'"{f}": null' for f in field_names)
+
+    return f"""You are a strict document field extraction engine for a {schema['doc_name']}. You extract ONLY information that is explicitly present in the given OCR text. You never guess, infer, or generate plausible-sounding values.
+
+Document details:
+- Script direction: {schema['script_direction']}
+- Expected date format on document: {schema['date_format']}
 
 RULES (follow exactly):
-1. Extract ONLY these fields: document_type, name, dob, id_number, issue_date, expiry_date, address, additional_fields.
+1. Extract ONLY these fields: {", ".join(field_names)}, additional_fields.
 2. If a field is not clearly present in the text, set its value to null. Do NOT guess or fabricate.
-3. document_type must be your best label for what kind of document this is (e.g. "driving_license", "insurance_policy", "aadhaar_card", "invoice", "unknown"). Infer this ONLY from visible text/headers, never assume.
-4. Dates must be output exactly as they appear in the source text (do not reformat, do not calculate).
-5. additional_fields is an object for any other clearly-labeled key-value pairs found in the text that don't fit the fixed fields above (e.g. policy_number, premium, blood_group). Use null / empty object {} if none.
-6. OCR text may contain noise, misspellings, or broken words. Use context to correctly map noisy labels to fields, but never invent values not present in the text.
-7.The input may contain two OCR passes of the same document (labeled "OCR PASS 1" and "OCR PASS 2") since OCR quality can vary. Cross-reference both passes for the same field — if one pass shows garbled/nonsensical text for a field but the other shows a clean, plausible value, use the clean one. Only return null if BOTH passes fail to show a plausible value for that field.
-8. The document may contain multiple names (e.g. applicant name AND father's/husband's name). Identify which one is the DOCUMENT HOLDER'S own name (usually printed first, largest, or right below "Name"), not a relative's name — put only that one in the "name" field. Do not put father's/husband's name in additional_fields either unless clearly labeled as such.
+3. Dates must be output exactly as they appear in the source text (do not reformat, do not calculate).
+4. additional_fields is an object for any other clearly-labeled key-value pairs found in the text that don't fit the fixed fields above. Use {{}} if none.
+5. OCR text may contain noise, misspellings, or broken words. Use context to correctly map noisy labels to fields, but never invent values not present in the text.
+6. The input may contain two OCR passes of the same document (labeled "OCR PASS 1" and "OCR PASS 2"). Cross-reference both — if one pass shows garbled text for a field but the other shows a clean, plausible value, use the clean one. Only return null if BOTH passes fail.
+7. The document may contain multiple names (e.g. applicant AND father's/husband's name). Identify which one is the DOCUMENT HOLDER'S own name — put only that one in the "name" field.
+8. If the document holder's name is split across separate labeled fields (e.g. "SURNAME/NOM" and "GIVEN NAMES/PRÉNOMS", or "Last Name" and "First Name"), combine them into a single full name string in the "name" field — surname first, then given names, in the order they'd naturally be spoken (e.g. surname "AWOLEKE" + given names "LEYE, TOMIWA" -> "AWOLEKE LEYE TOMIWA"). Strip any commas used only as a separator between given names.
 9. Output ONLY a single valid JSON object. No markdown code fences, no explanation, no preamble, no trailing text.
-10. Output must start with { and end with }. Nothing before or after.
+10. Output must start with {{ and end with }}. Nothing before or after.
+
+Fields to extract:
+{field_lines}
 
 OUTPUT SCHEMA (all keys always present):
-{
-  "document_type": string,
-  "name": string or null,
-  "dob": string or null,
-  "id_number": string or null,
-  "issue_date": string or null,
-  "expiry_date": string or null,
-  "address": string or null,
+{{
+  {schema_json_keys},
   "additional_fields": object
-}"""
+}}"""
 
-def extract_fields(ocr_text):
+
+def extract_fields(ocr_text, schema: dict):
+    system_prompt = _build_system_prompt(schema)
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"OCR TEXT:\n{ocr_text}\n\nExtract fields as JSON per the schema."}
         ],
         temperature=0,
@@ -46,8 +55,6 @@ def extract_fields(ocr_text):
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {
-            "document_type": "unknown", "name": None, "dob": None, "id_number": None,
-            "issue_date": None, "expiry_date": None, "address": None,
-            "additional_fields": {"parse_error": raw},
-        }
+        fallback = {f: None for f in schema["fields"].keys()}
+        fallback["additional_fields"] = {"parse_error": raw}
+        return fallback

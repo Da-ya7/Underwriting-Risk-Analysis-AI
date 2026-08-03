@@ -1,0 +1,16 @@
+{
+  "country_code": "KE",
+  "doc_type": "national_id",
+  "doc_name": "Kenya National ID",
+  "language": "eng+swa",
+  "script_direction": "ltr",
+  "date_format": "DD.MM.YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^\\d{7,8}$"},
+    "address": {"required": false},
+    "expiry_date": {"required": false},
+    "issue_date": {"required": true}
+  }
+}
