@@ -1,0 +1,16 @@
+{
+  "country_code": "AE",
+  "doc_type": "drivers_license",
+  "doc_name": "UAE Driving License",
+  "language": "eng+ara",
+  "script_direction": "rtl",
+  "date_format": "DD/MM/YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^\\d{7,9}$"},
+    "expiry_date": {"required": true},
+    "issue_date": {"required": false},
+    "address": {"required": false}
+  }
+}

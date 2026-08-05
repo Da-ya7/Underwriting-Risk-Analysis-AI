@@ -7,7 +7,10 @@ import pytesseract
 
 from .llm_extract import extract_fields
 from .validator import validate_against_form
-from .schema_loader import load_schema, SchemaNotFoundError, list_supported_docs
+from .schema_loader import (
+    load_schema, SchemaNotFoundError, list_supported_docs,
+    list_countries, list_doc_types_for_country
+)
 
 router = APIRouter()
 
@@ -70,13 +73,13 @@ async def validate_certificate(
         raise HTTPException(status_code=422, detail="Could not decode uploaded image")
 
     processed = _preprocess_for_ocr(img)
-    ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
+    ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
 
     ocr_text_regional = ""
     schema_lang = schema.get("language", "eng")
     if schema_lang != "eng":
         try:
-            ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang)
+            ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
         except pytesseract.TesseractError:
             pass  # lang pack not installed -> just use English pass
 
@@ -106,3 +109,16 @@ async def validate_certificate(
 @router.get("/api/v1/supported-documents")
 async def supported_documents():
     return {"documents": list_supported_docs()}
+
+
+@router.get("/api/v1/countries")
+async def get_countries():
+    return {"countries": list_countries()}
+
+
+@router.get("/api/v1/countries/{country_code}/doc-types")
+async def get_doc_types(country_code: str):
+    doc_types = list_doc_types_for_country(country_code)
+    if not doc_types:
+        raise HTTPException(status_code=404, detail=f"No document types found for country {country_code}")
+    return {"country_code": country_code, "doc_types": doc_types}

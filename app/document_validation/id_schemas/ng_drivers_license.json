@@ -1,0 +1,16 @@
+{
+  "country_code": "NG",
+  "doc_type": "drivers_license",
+  "doc_name": "Nigeria Driving License",
+  "language": "eng",
+  "script_direction": "ltr",
+  "date_format": "DD-MM-YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^[A-Z]{3}\\d{6}[A-Z]{2}\\d{2}$"},
+    "expiry_date": {"required": true},
+    "issue_date": {"required": false},
+    "address": {"required": false}
+  }
+}

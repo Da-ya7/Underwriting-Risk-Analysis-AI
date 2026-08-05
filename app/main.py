@@ -49,7 +49,29 @@ def health():
     return {"status": "ok"}
 
 
-# ... /api/v1/underwrite and /api/v1/underwrite/from-proposal unchanged, keep as-is ...
+@app.post("/api/v1/underwrite", response_model=UnderwritingResponse)
+def underwrite(applicant: ProposalRequest):
+    applicant_data = applicant.model_dump()
+    result = underwriting_model.predict(applicant_data)
+    risk_factors, positive_factors = build_explanation(applicant_data, underwriting_model.meta)
+    summary = build_summary(result["risk_score"], risk_factors, positive_factors)
+    return UnderwritingResponse(
+        risk_score=result["risk_score"],
+        confidence=result["risk_confidence"],
+        reasoning_summary=summary,
+        risk_factors=risk_factors,
+        positive_factors=positive_factors,
+    )
+
+
+@app.post("/api/v1/underwrite/from-proposal", response_model=UnderwritingResponse)
+def underwrite_from_proposal(raw_proposal: RawProposalRequest):
+    try:
+        converted = convert_raw_proposal(raw_proposal.model_dump())
+        applicant = ProposalRequest(**converted)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid raw proposal data: {e}")
+    return underwrite(applicant)
 
 
 # ---------- CLIENT: submit proposal + attached document in one request ----------
@@ -120,12 +142,12 @@ async def submit_proposal(
             img = None
         if img is not None:
             processed = _preprocess_for_ocr(img)
-            ocr_text_eng = pytesseract.image_to_string(processed, lang="eng")
+            ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
             ocr_text_regional = ""
             schema_lang = schema.get("language", "eng")
             if schema_lang != "eng":
                 try:
-                    ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang)
+                    ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
                 except pytesseract.TesseractError:
                     pass  # lang pack not installed -> just use English pass
             ocr_text = (

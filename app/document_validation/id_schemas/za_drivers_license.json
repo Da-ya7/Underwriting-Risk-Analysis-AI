@@ -1,0 +1,16 @@
+{
+  "country_code": "ZA",
+  "doc_type": "drivers_license",
+  "doc_name": "South Africa Driving License",
+  "language": "eng",
+  "script_direction": "ltr",
+  "date_format": "YYYY-MM-DD",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "id_number": {"required": true, "regex": "^\\d{13}$"},
+    "expiry_date": {"required": true},
+    "issue_date": {"required": false},
+    "address": {"required": false}
+  }
+}
