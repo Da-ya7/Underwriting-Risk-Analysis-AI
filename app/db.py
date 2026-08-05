@@ -55,6 +55,19 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
+    # Users table — auth (bcrypt hash only, never plain password)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            full_name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL UNIQUE,
+            password_hash VARCHAR(255) NOT NULL,
+            role VARCHAR(20) NOT NULL DEFAULT 'client',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS proposals (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -87,8 +100,17 @@ def init_db():
     _add_column_if_missing(cur, "proposals", "document_mimetype VARCHAR(100)")
     _add_column_if_missing(cur, "proposals", "extracted_fields JSON")
     _add_column_if_missing(cur, "proposals", "validation_results JSON")
+    _add_column_if_missing(cur, "proposals", "user_id INT")
 
     conn.commit()
+
+    # Index speeds up the duplicate-proposal check (user_id + insurance_type + status)
+    try:
+        cur.execute("CREATE INDEX idx_proposals_user_insurance ON proposals (user_id, insurance_type, status)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:  # Duplicate key name -> index already exists, fine
+            raise
 
     cur.close()
     conn.close()

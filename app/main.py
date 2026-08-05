@@ -1,6 +1,6 @@
 import json
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 import cv2
@@ -23,6 +23,9 @@ from .model_service import underwriting_model
 from .explain import build_explanation, build_summary
 from .conversion import convert_raw_proposal
 from .db import get_connection, init_db
+from .auth.router import router as auth_router
+from .auth.dependencies import get_current_user, require_role
+from .auth.schemas import CurrentUser
 
 app = FastAPI(
     title="Underwriting Risk Analysis AI",
@@ -37,6 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(document_validation_router)
+app.include_router(auth_router)
 
 
 @app.on_event("startup")
@@ -78,7 +82,6 @@ def underwrite_from_proposal(raw_proposal: RawProposalRequest):
 @app.post("/api/v1/proposals", response_model=ProposalSubmitResponse)
 async def submit_proposal(
     file: UploadFile = File(..., description="ID/certificate — required, attached with the form"),
-    full_name: str = Form(...),
     insurance_type: str = Form(...),
     age: int = Form(...),
     annual_income: float = Form(...),
@@ -97,7 +100,12 @@ async def submit_proposal(
     # Defaults keep old callers (India/Aadhaar) working unchanged.
     country_code: str = Form("IN"),
     doc_type: str = Form("aadhaar"),
+    current_user: CurrentUser = Depends(require_role("client")),
 ):
+    # full_name now comes from the authenticated account, not the form —
+    # prevents a logged-in user submitting a proposal under someone else's name.
+    full_name = current_user.full_name
+
     try:
         # validate form fields against same rules as before (raises 422 on bad input)
         try:
@@ -121,6 +129,29 @@ async def submit_proposal(
             schema = load_schema(country_code, doc_type)
         except SchemaNotFoundError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+        # Duplicate-request guard: block a second submission for the same
+        # insurance_type while an earlier one from this user is still PENDING.
+        # Once that earlier one is APPROVED or REJECTED, this check clears
+        # and a new request for the same insurance_type is allowed again.
+        dup_conn = get_connection()
+        dup_cur = dup_conn.cursor(dictionary=True)
+        dup_cur.execute(
+            """SELECT id, status FROM proposals
+               WHERE user_id=%s AND insurance_type=%s AND status='PENDING'
+               LIMIT 1""",
+            (current_user.id, insurance_type),
+        )
+        existing = dup_cur.fetchone()
+        dup_cur.close()
+        dup_conn.close()
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"You already have a pending {insurance_type} request "
+                       f"(id #{existing['id']}, status: {existing['status']}). "
+                       f"Wait for a decision before submitting another.",
+            )
 
         raw = validated.model_dump()
         raw.pop("full_name")
@@ -169,15 +200,15 @@ async def submit_proposal(
                (full_name, insurance_type, raw_input, confidence, risk_score,
                 reasoning_summary, risk_factors, positive_factors, status,
                 document_blob, document_filename, document_mimetype,
-                extracted_fields, validation_results, country_code, doc_type)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                extracted_fields, validation_results, country_code, doc_type, user_id)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 full_name, insurance_type, json.dumps(raw),
                 result["risk_confidence"], result["risk_score"],
                 summary, json.dumps(risk_factors), json.dumps(positive_factors), "PENDING",
                 doc_bytes, file.filename, file.content_type,
                 json.dumps(extracted), json.dumps(val_results),
-                country_code, doc_type,
+                country_code, doc_type, current_user.id,
             ),
         )
         conn.commit()
@@ -194,12 +225,18 @@ async def submit_proposal(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- UNDERWRITER: list all proposals (unchanged) ----------
+# ---------- List proposals: client sees own only, underwriter sees all ----------
 @app.get("/api/v1/proposals", response_model=list[ProposalListItem])
-def list_proposals():
+def list_proposals(current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id, full_name, insurance_type, status, created_at FROM proposals ORDER BY created_at DESC")
+    if current_user.role == "underwriter":
+        cur.execute("SELECT id, full_name, insurance_type, status, created_at FROM proposals ORDER BY created_at DESC")
+    else:
+        cur.execute(
+            "SELECT id, full_name, insurance_type, status, created_at FROM proposals WHERE user_id=%s ORDER BY created_at DESC",
+            (current_user.id,),
+        )
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -208,9 +245,9 @@ def list_proposals():
     return rows
 
 
-# ---------- UNDERWRITER: full detail incl AI verdict + doc validation ----------
+# ---------- Full detail incl AI verdict + doc validation ----------
 @app.get("/api/v1/proposals/{proposal_id}", response_model=ProposalDetail)
-def get_proposal(proposal_id: int):
+def get_proposal(proposal_id: int, current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     cur.execute("SELECT * FROM proposals WHERE id=%s", (proposal_id,))
@@ -220,6 +257,9 @@ def get_proposal(proposal_id: int):
 
     if not row:
         raise HTTPException(status_code=404, detail="Proposal not found")
+
+    if current_user.role != "underwriter" and row.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
     raw = json.loads(row["raw_input"]) if isinstance(row["raw_input"], str) else row["raw_input"]
 
@@ -269,18 +309,21 @@ def get_proposal(proposal_id: int):
     )
 
 
-# ---------- UNDERWRITER: raw document bytes (view/download) ----------
+# ---------- Raw document bytes (view/download) ----------
 @app.get("/api/v1/proposals/{proposal_id}/document")
-def get_proposal_document(proposal_id: int):
+def get_proposal_document(proposal_id: int, current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT document_blob, document_filename, document_mimetype FROM proposals WHERE id=%s", (proposal_id,))
+    cur.execute("SELECT user_id, document_blob, document_filename, document_mimetype FROM proposals WHERE id=%s", (proposal_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
 
     if not row or not row["document_blob"]:
         raise HTTPException(status_code=404, detail="No document attached to this proposal")
+
+    if current_user.role != "underwriter" and row.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to this document")
 
     return Response(
         content=row["document_blob"],
@@ -289,9 +332,13 @@ def get_proposal_document(proposal_id: int):
     )
 
 
-# ---------- UNDERWRITER: final decision (unchanged) ----------
+# ---------- UNDERWRITER-ONLY: final decision ----------
 @app.patch("/api/v1/proposals/{proposal_id}/decision")
-def set_decision(proposal_id: int, decision: DecisionRequest):
+def set_decision(
+    proposal_id: int,
+    decision: DecisionRequest,
+    current_user: CurrentUser = Depends(require_role("underwriter")),
+):
     if decision.status not in ("APPROVED", "REJECTED"):
         raise HTTPException(status_code=422, detail="status must be APPROVED or REJECTED")
 
