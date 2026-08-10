@@ -8,7 +8,7 @@
   "fields": {
     "name": {"required": true},
     "dob": {"required": true},
-    "dl_number": {"required": true, "regex": "^[A-Z]{2}\\d{2} ?\\d{11}$"},
+    "dl_number": {"required": true, "regex": "^[A-Z]{2}\\d{2}[ -]?\\d{11}$"},
     "issue_date": {"required": true},
     "expiry_date": {"required": true},
     "address": {"required": false}

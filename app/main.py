@@ -263,6 +263,16 @@ def get_proposal(proposal_id: int, current_user: CurrentUser = Depends(get_curre
     if current_user.role != "underwriter" and row.get("user_id") != current_user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
+    # This endpoint's response_model (ProposalDetail) requires life-only fields
+    # (age, height_cm, weight_kg, etc.) that don't exist in a vehicle proposal's
+    # raw_input. Fail clearly here instead of an uncaught KeyError -> 500 below.
+    if row["insurance_type"] != "life":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Proposal #{proposal_id} is insurance_type='{row['insurance_type']}'. "
+                   f"Use GET /api/v1/{row['insurance_type']}/proposals/{proposal_id} instead.",
+        )
+
     raw = json.loads(row["raw_input"]) if isinstance(row["raw_input"], str) else row["raw_input"]
 
     # Multi-country ID support: re-resolve schema_used for display.

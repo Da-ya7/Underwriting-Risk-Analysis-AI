@@ -50,6 +50,28 @@ async def submit_vehicle_proposal(
 ):
     full_name = current_user.full_name
 
+    # Duplicate-request guard: block a second submission for insurance_type='vehicle'
+    # while an earlier one from this user is still PENDING. Mirrors life module's
+    # check in main.py. Clears once that earlier one is APPROVED or REJECTED.
+    dup_conn = get_connection()
+    dup_cur = dup_conn.cursor(dictionary=True)
+    dup_cur.execute(
+        """SELECT id, status FROM proposals
+           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
+           LIMIT 1""",
+        (current_user.id,),
+    )
+    existing = dup_cur.fetchone()
+    dup_cur.close()
+    dup_conn.close()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"You already have a pending vehicle request "
+                   f"(id #{existing['id']}, status: {existing['status']}). "
+                   f"Wait for a decision before submitting another.",
+        )
+
     try:
         validated = RawVehicleProposalRequest(
             make=make, model=model, year=year, vehicle_type=vehicle_type,

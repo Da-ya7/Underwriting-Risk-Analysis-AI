@@ -126,6 +126,39 @@ def init_db():
         if e.errno != 1061:  # Duplicate key name -> index already exists, fine
             raise
 
+    # Index speeds up the proposals -> vehicles join (proposals.vehicle_id lookup)
+    try:
+        cur.execute("CREATE INDEX idx_proposals_vehicle_id ON proposals (vehicle_id)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
+    # Index speeds up direct per-user vehicle lookups
+    try:
+        cur.execute("CREATE INDEX idx_vehicles_user_id ON vehicles (user_id)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
+    # FK constraint: proposals.vehicle_id -> vehicles.id
+    # RESTRICT (not CASCADE/SET NULL) — proposals are audit records; a vehicle
+    # must not be hard-deleted while a proposal still references it. NULL is
+    # allowed (life proposals have vehicle_id=NULL), FK still enforces on
+    # non-null values only.
+    try:
+        cur.execute("""
+            ALTER TABLE proposals
+            ADD CONSTRAINT fk_proposals_vehicle_id
+            FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+            ON DELETE RESTRICT ON UPDATE RESTRICT
+        """)
+        conn.commit()
+    except Error as e:
+        if e.errno != 1826:  # Duplicate foreign key constraint name -> already exists, fine
+            raise
+
     cur.close()
     conn.close()
 
