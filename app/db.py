@@ -103,7 +103,21 @@ def init_db():
     _add_column_if_missing(cur, "proposals", "user_id INT")
 
     conn.commit()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vehicles (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            make VARCHAR(100), model VARCHAR(100), year INT,
+            vehicle_type VARCHAR(50), engine_cc INT, fuel_type VARCHAR(30),
+            vehicle_value FLOAT, safety_features TINYINT, anti_theft TINYINT,
+            color VARCHAR(30),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
 
+    _add_column_if_missing(cur, "proposals", "vehicle_id INT")
+    conn.commit()
     # Index speeds up the duplicate-proposal check (user_id + insurance_type + status)
     try:
         cur.execute("CREATE INDEX idx_proposals_user_insurance ON proposals (user_id, insurance_type, status)")

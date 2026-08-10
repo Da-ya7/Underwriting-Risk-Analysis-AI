@@ -24,6 +24,7 @@ from .explain import build_explanation, build_summary
 from .conversion import convert_raw_proposal
 from .db import get_connection, init_db
 from .auth.router import router as auth_router
+from .vehicle.router import router as vehicle_router
 from .auth.dependencies import get_current_user, require_role
 from .auth.schemas import CurrentUser
 
@@ -41,6 +42,7 @@ app.add_middleware(
 )
 app.include_router(document_validation_router)
 app.include_router(auth_router)
+app.include_router(vehicle_router)
 
 
 @app.on_event("startup")

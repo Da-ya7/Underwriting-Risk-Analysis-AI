@@ -1,0 +1,16 @@
+{
+  "country_code": "IN",
+  "doc_type": "drivers_license",
+  "doc_name": "India Driving License",
+  "language": "eng",
+  "script_direction": "ltr",
+  "date_format": "DD-MM-YYYY",
+  "fields": {
+    "name": {"required": true},
+    "dob": {"required": true},
+    "dl_number": {"required": true, "regex": "^[A-Z]{2}\\d{2} ?\\d{11}$"},
+    "issue_date": {"required": true},
+    "expiry_date": {"required": true},
+    "address": {"required": false}
+  }
+}
