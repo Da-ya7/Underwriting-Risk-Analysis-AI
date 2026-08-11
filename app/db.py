@@ -116,22 +116,46 @@ def init_db():
     """)
     conn.commit()
 
-    _add_column_if_missing(cur, "proposals", "vehicle_id INT")
+    # --- Fleet model: one proposal can now hold MANY vehicles. ---
+    # Each vehicle carries its own risk score + its own underwriter decision
+    # (status), independent of the other vehicles on the same proposal.
+    _add_column_if_missing(cur, "vehicles", "proposal_id INT")
+    _add_column_if_missing(cur, "vehicles", "status VARCHAR(30) DEFAULT 'PENDING'")
+    _add_column_if_missing(cur, "vehicles", "risk_score FLOAT")
+    _add_column_if_missing(cur, "vehicles", "confidence FLOAT")
+    _add_column_if_missing(cur, "vehicles", "reasoning_summary TEXT")
+    _add_column_if_missing(cur, "vehicles", "risk_factors JSON")
+    _add_column_if_missing(cur, "vehicles", "positive_factors JSON")
     conn.commit()
+
+    # Drop the OLD one-to-one link (proposals.vehicle_id -> vehicles.id).
+    # Superseded by vehicles.proposal_id (one-to-many, fleet model). Must drop
+    # the FK and its index before dropping the column itself, in that order.
+    try:
+        cur.execute("ALTER TABLE proposals DROP FOREIGN KEY fk_proposals_vehicle_id")
+        conn.commit()
+    except Error as e:
+        if e.errno not in (1091, 1025):  # doesn't exist / already gone -> fine
+            raise
+    try:
+        cur.execute("ALTER TABLE proposals DROP INDEX idx_proposals_vehicle_id")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1091:
+            raise
+    try:
+        cur.execute("ALTER TABLE proposals DROP COLUMN vehicle_id")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1091:  # column doesn't exist -> fine
+            raise
+
     # Index speeds up the duplicate-proposal check (user_id + insurance_type + status)
     try:
         cur.execute("CREATE INDEX idx_proposals_user_insurance ON proposals (user_id, insurance_type, status)")
         conn.commit()
     except Error as e:
         if e.errno != 1061:  # Duplicate key name -> index already exists, fine
-            raise
-
-    # Index speeds up the proposals -> vehicles join (proposals.vehicle_id lookup)
-    try:
-        cur.execute("CREATE INDEX idx_proposals_vehicle_id ON proposals (vehicle_id)")
-        conn.commit()
-    except Error as e:
-        if e.errno != 1061:
             raise
 
     # Index speeds up direct per-user vehicle lookups
@@ -142,16 +166,22 @@ def init_db():
         if e.errno != 1061:
             raise
 
-    # FK constraint: proposals.vehicle_id -> vehicles.id
-    # RESTRICT (not CASCADE/SET NULL) — proposals are audit records; a vehicle
-    # must not be hard-deleted while a proposal still references it. NULL is
-    # allowed (life proposals have vehicle_id=NULL), FK still enforces on
-    # non-null values only.
+    # Index speeds up the vehicles -> proposal join (new one-to-many direction)
+    try:
+        cur.execute("CREATE INDEX idx_vehicles_proposal_id ON vehicles (proposal_id)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
+    # FK constraint: vehicles.proposal_id -> proposals.id
+    # RESTRICT — a proposal (the audit record) must not be hard-deleted while
+    # it still has vehicles attached. NULL allowed for any legacy/orphan rows.
     try:
         cur.execute("""
-            ALTER TABLE proposals
-            ADD CONSTRAINT fk_proposals_vehicle_id
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles(id)
+            ALTER TABLE vehicles
+            ADD CONSTRAINT fk_vehicles_proposal_id
+            FOREIGN KEY (proposal_id) REFERENCES proposals(id)
             ON DELETE RESTRICT ON UPDATE RESTRICT
         """)
         conn.commit()

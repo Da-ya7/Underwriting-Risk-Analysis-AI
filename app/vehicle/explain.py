@@ -90,7 +90,7 @@ def _is_risky(feature: str, value: float, thresholds: dict) -> bool:
     if feature == "driving_experience":
         return value < thresholds["driving_experience"]
     if feature == "license_age":
-        return value < thresholds["license_age"]
+        return value <= thresholds["license_age"]
     if feature == "previous_accidents":
         return value > thresholds["previous_accidents"]
     if feature == "previous_claims":
