@@ -3,38 +3,15 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, R
 from pydantic import ValidationError
 
 from .schemas import RawVehicleProposalRequest, VehicleProposalSubmitResponse
-from .conversion import convert_raw_vehicle_proposal
-from .model_service import vehicle_underwriting_model
-from .explain import build_explanation, build_summary
+from .pipeline import (
+    get_open_proposal, score_vehicle, run_ocr_and_extract,
+    create_proposal_with_document, insert_vehicle,
+)
 from ..db import get_connection
 from ..auth.dependencies import get_current_user, require_role
 from ..auth.schemas import CurrentUser
 
-from ..document_validation.router import _decode_image, _preprocess_for_ocr
-from ..document_validation.llm_extract import extract_fields
-from ..document_validation.validator import validate_against_form
-from ..document_validation.schema_loader import load_schema, SchemaNotFoundError
-import pytesseract
-
 router = APIRouter(prefix="/api/v1/vehicle", tags=["vehicle"])
-
-
-def _get_open_proposal(user_id: int):
-    """Fleet model: a user's ongoing (PENDING) vehicle proposal is where new
-    vehicles get attached. Returns the proposal row dict, or None if the user
-    has no open fleet proposal yet (their next submission starts a new one)."""
-    conn = get_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT id, status FROM proposals
-           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
-           LIMIT 1""",
-        (user_id,),
-    )
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row
 
 
 @router.post("/proposals", response_model=VehicleProposalSubmitResponse)
@@ -89,19 +66,12 @@ async def submit_vehicle_proposal(
         raise HTTPException(status_code=422, detail=e.errors())
 
     raw = validated.model_dump()
-
-    try:
-        converted = convert_raw_vehicle_proposal(raw)
-        result = vehicle_underwriting_model.predict(converted)
-        risk_factors, positive_factors = build_explanation(converted, vehicle_underwriting_model.meta)
-        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
-    except KeyError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
+    converted, result, risk_factors, positive_factors, summary = score_vehicle(raw)
 
     # ---- Fleet model: attach to an existing open (PENDING) proposal if the
     # user has one; otherwise this vehicle is the first in a new proposal and
     # a license document is required to create it. ----
-    open_proposal = _get_open_proposal(current_user.id)
+    open_proposal = get_open_proposal(current_user.id)
 
     if open_proposal:
         proposal_id = open_proposal["id"]
@@ -112,83 +82,19 @@ async def submit_vehicle_proposal(
                 detail="A driving license file is required to start a new "
                        "vehicle proposal (only for the first vehicle in a fleet).",
             )
-        try:
-            schema = load_schema(country_code, doc_type)
-        except SchemaNotFoundError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
         doc_bytes = await file.read()
-        extracted, val_results = {}, []
-        try:
-            img = _decode_image(doc_bytes)
-        except Exception:
-            img = None
-        if img is not None:
-            processed = _preprocess_for_ocr(img)
-            ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
-            ocr_text_regional = ""
-            schema_lang = schema.get("language", "eng")
-            if schema_lang != "eng":
-                try:
-                    ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
-                except pytesseract.TesseractError:
-                    pass
-            ocr_text = (
-                "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
-                f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
-            )
-            extracted = extract_fields(ocr_text, schema)
-            val_results = validate_against_form(
-                extracted, {"full_name": full_name, "age": driver_age}, schema
-            )
-
-        try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO proposals
-                   (full_name, insurance_type, raw_input, status,
-                    document_blob, document_filename, document_mimetype,
-                    extracted_fields, validation_results, country_code, doc_type,
-                    user_id)
-                   VALUES (%s,'vehicle',%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (full_name, json.dumps(raw),
-                 doc_bytes, file.filename, file.content_type,
-                 json.dumps(extracted), json.dumps(val_results),
-                 country_code, doc_type, current_user.id),
-            )
-            conn.commit()
-            proposal_id = cur.lastrowid
-            cur.close()
-            conn.close()
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    # ---- Insert this vehicle, with its OWN risk score, under proposal_id ----
-    try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO vehicles (user_id, proposal_id, make, model, year, vehicle_type,
-               engine_cc, fuel_type, vehicle_value, safety_features, anti_theft, color,
-               status, risk_score, confidence, reasoning_summary, risk_factors, positive_factors)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s)""",
-            (current_user.id, proposal_id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
-             raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
-             converted["safety_features"], converted["anti_theft"], raw["color"],
-             result["risk_score"], result["risk_confidence"], summary,
-             json.dumps(risk_factors), json.dumps(positive_factors)),
+        extracted, val_results = run_ocr_and_extract(
+            doc_bytes, country_code, doc_type, full_name, driver_age
         )
-        conn.commit()
-        vehicle_id = cur.lastrowid
-        cur.close()
-        conn.close()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        proposal_id = create_proposal_with_document(
+            full_name, raw, current_user.id, doc_bytes, file.filename, file.content_type,
+            extracted, val_results, country_code, doc_type,
+        )
+
+    vehicle_id = insert_vehicle(
+        current_user.id, proposal_id, raw, converted, result,
+        risk_factors, positive_factors, summary,
+    )
 
     return VehicleProposalSubmitResponse(id=proposal_id, vehicle_id=vehicle_id, status="PENDING")
 
@@ -211,8 +117,6 @@ def list_vehicle_proposals(current_user: CurrentUser = Depends(get_current_user)
         )
     proposals = cur.fetchall()
 
-    # Aggregate per-fleet stats (vehicle count, total value, flagged count)
-    # in one extra query rather than N+1-ing per proposal.
     if proposals:
         ids = [p["id"] for p in proposals]
         fmt = ",".join(["%s"] * len(ids))
@@ -312,9 +216,6 @@ def set_vehicle_decision(
     cur.execute("UPDATE vehicles SET status=%s WHERE id=%s", (status, vehicle_id))
     conn.commit()
 
-    # Auto-close the proposal once every vehicle in the fleet has a decision
-    # (no more PENDING vehicles) — a later vehicle submission then starts a
-    # fresh proposal instead of attaching to this one.
     proposal_id = vrow["proposal_id"]
     cur.execute(
         "SELECT COUNT(*) AS pending_count FROM vehicles WHERE proposal_id=%s AND status='PENDING'",
