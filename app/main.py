@@ -10,6 +10,7 @@ import pytesseract
 from .conversion import convert_raw_proposal, calculate_bmi
 from .document_validation.router import router as document_validation_router
 from .document_validation.llm_extract import extract_fields
+from .vehicle.bulk_router import router as vehicle_bulk_router
 from .document_validation.router import _decode_image, _preprocess_for_ocr
 from .document_validation.validator import validate_against_form
 from .document_validation.schema_loader import load_schema, SchemaNotFoundError
@@ -43,6 +44,7 @@ app.add_middleware(
 app.include_router(document_validation_router)
 app.include_router(auth_router)
 app.include_router(vehicle_router)
+app.include_router(vehicle_bulk_router)
 
 
 @app.on_event("startup")

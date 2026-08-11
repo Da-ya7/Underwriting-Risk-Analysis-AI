@@ -16,3 +16,4 @@ groq
 python-dotenv
 passlib[bcrypt]
 python-jose[cryptography]
+openpyxl

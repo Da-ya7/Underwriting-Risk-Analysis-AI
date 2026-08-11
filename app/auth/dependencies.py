@@ -11,7 +11,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login", auto_error=F
 AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
 
 # fake user returned when auth is off — pick a role that passes every route
-_DEV_USER = CurrentUser(id=1, full_name="Dev User", email="dev@local", role="client")
+_DEV_USER = CurrentUser(id=1, full_name="Dev User", email="dev@local", role="underwriter")
 
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
