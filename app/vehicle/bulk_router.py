@@ -1,38 +1,36 @@
 """
-Bulk vehicle-fleet submission via spreadsheet (csv/xls/xlsx).
+Bulk vehicle submission via spreadsheet (csv/xls/xlsx).
 
-One sheet = one fleet submission. Each ROW = one vehicle. All rows land under
-the SAME proposal — reuses the exact fleet model as the single-vehicle-form
-endpoint (router.py), just fills it from a sheet instead of typing each
-vehicle in by hand.
+Flat model: each ROW = its own independent proposal + vehicle (same as
+POST /api/v1/vehicle/proposals/batch, just reading a file instead of a JSON
+array). One license photo is uploaded once, alongside the sheet, and reused
+for every row's document/OCR check (same driver for the whole sheet).
 
-The license photo is uploaded ONCE, separately from the sheet (not a sheet
-column) — same owner/driver for every vehicle in the sheet, so one photo
-covers the whole fleet. If the user already has an open (PENDING) vehicle
-proposal, the photo isn't needed again — new rows just attach to it, same
-rule as the single-vehicle endpoint.
-
-Expected column headers (case-insensitive, exact names), NO license fields:
+Expected column headers (case-insensitive), NO license fields in the sheet:
 make, model, year, vehicle_type, engine_cc, fuel_type, vehicle_value,
 safety_features, anti_theft, color, driver_age, driving_experience,
 license_age, previous_accidents, previous_claims, traffic_violations,
 usage_type, annual_mileage, city, region, previous_insurance, policy_lapses
-
-safety_features/anti_theft/previous_insurance columns: "yes"/"no" text,
-same convention as the single-submit form.
 """
 import io
+import json
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import ValidationError
 
 from .schemas import RawVehicleProposalRequest
-from .pipeline import (
-    get_open_proposal, score_vehicle, run_ocr_and_extract,
-    create_proposal_with_document, insert_vehicle,
-)
+from .conversion import convert_raw_vehicle_proposal
+from .model_service import vehicle_underwriting_model
+from .explain import build_explanation, build_summary
+from ..db import get_connection
 from ..auth.dependencies import require_role
 from ..auth.schemas import CurrentUser
+
+from ..document_validation.router import _decode_image, _preprocess_for_ocr
+from ..document_validation.llm_extract import extract_fields
+from ..document_validation.validator import validate_against_form
+from ..document_validation.schema_loader import load_schema, SchemaNotFoundError
+import pytesseract
 
 router = APIRouter(prefix="/api/v1/vehicle", tags=["vehicle-bulk"])
 
@@ -53,10 +51,7 @@ def _read_sheet(filename: str, content: bytes) -> pd.DataFrame:
         elif name.endswith(".xlsx") or name.endswith(".xls"):
             return pd.read_excel(io.BytesIO(content))
         else:
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported file type. Upload .csv, .xls, or .xlsx",
-            )
+            raise HTTPException(status_code=400, detail="Unsupported file type. Upload .csv, .xls, or .xlsx")
     except HTTPException:
         raise
     except Exception as e:
@@ -66,12 +61,7 @@ def _read_sheet(filename: str, content: bytes) -> pd.DataFrame:
 @router.post("/proposals/bulk-upload")
 async def bulk_upload_vehicle_proposals(
     sheet: UploadFile = File(..., description="CSV/XLS/XLSX — one row per vehicle"),
-    file: UploadFile | None = File(
-        None,
-        description="Driving license photo — required ONLY if you don't already "
-                    "have an open (PENDING) vehicle proposal. One photo covers "
-                    "every vehicle in the sheet.",
-    ),
+    file: UploadFile = File(..., description="Driving license photo — reused for every row"),
     country_code: str = "IN",
     doc_type: str = "drivers_license",
     current_user: CurrentUser = Depends(require_role("client")),
@@ -84,73 +74,78 @@ async def bulk_upload_vehicle_proposals(
 
     missing_cols = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing_cols:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Sheet is missing required column(s): {', '.join(missing_cols)}",
-        )
+        raise HTTPException(status_code=422, detail=f"Sheet is missing required column(s): {', '.join(missing_cols)}")
     if len(df) == 0:
         raise HTTPException(status_code=422, detail="Sheet has no data rows")
 
-    # ---- Resolve the ONE proposal every row in this sheet will attach to ----
-    open_proposal = get_open_proposal(current_user.id)
-    if open_proposal:
-        proposal_id = open_proposal["id"]
-    else:
-        if file is None:
-            raise HTTPException(
-                status_code=422,
-                detail="A driving license photo is required to start a new "
-                       "fleet proposal (you have no open proposal to attach to).",
-            )
-        # Use the first row's driver_age for the license-vs-form name/age check —
-        # same driver applies across the whole sheet.
+    doc_bytes = await file.read()
+    try:
+        schema = load_schema(country_code, doc_type)
+    except SchemaNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    extracted, val_results = {}, []
+    try:
+        img = _decode_image(doc_bytes)
+    except Exception:
+        img = None
+    if img is not None:
+        processed = _preprocess_for_ocr(img)
+        ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
         try:
             first_driver_age = int(df.iloc[0]["driver_age"])
         except Exception:
             first_driver_age = None
-
-        doc_bytes = await file.read()
-        extracted, val_results = run_ocr_and_extract(
-            doc_bytes, country_code, doc_type, full_name, first_driver_age
+        schema_lang = schema.get("language", "eng")
+        ocr_text_regional = ""
+        if schema_lang != "eng":
+            try:
+                ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
+            except pytesseract.TesseractError:
+                pass
+        ocr_text = (
+            "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
+            f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
         )
-        # raw_input on the proposal itself just records the first row for
-        # reference/audit — each vehicle's real data lives on its own row.
-        first_row_raw = df.iloc[0].to_dict()
-        proposal_id = create_proposal_with_document(
-            full_name, first_row_raw, current_user.id, doc_bytes,
-            file.filename, file.content_type,
-            extracted, val_results, country_code, doc_type,
-        )
+        extracted = extract_fields(ocr_text, schema)
+        val_results = validate_against_form(extracted, {"full_name": full_name, "age": first_driver_age}, schema)
 
-    # ---- Validate + score + insert every row under that one proposal_id ----
     results = []
     for idx, row in df.iterrows():
-        row_num = idx + 2  # +2 = header row + 1-indexed, for user-facing errors
+        row_num = idx + 2
         row_dict = row.to_dict()
+
+        # Duplicate-request guard: same rule as single-submit.
+        dup_conn = get_connection()
+        dup_cur = dup_conn.cursor(dictionary=True)
+        dup_cur.execute(
+            """SELECT id, status FROM proposals
+               WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
+               LIMIT 1""",
+            (current_user.id,),
+        )
+        existing = dup_cur.fetchone()
+        dup_cur.close()
+        dup_conn.close()
+        if existing:
+            results.append({
+                "row": row_num, "status": "skipped",
+                "reason": f"Pending vehicle proposal already exists (id #{existing['id']})",
+            })
+            continue
 
         try:
             validated = RawVehicleProposalRequest(
-                make=str(row_dict["make"]),
-                model=str(row_dict["model"]),
-                year=int(row_dict["year"]),
-                vehicle_type=str(row_dict["vehicle_type"]),
-                engine_cc=int(row_dict["engine_cc"]),
-                fuel_type=str(row_dict["fuel_type"]),
-                vehicle_value=float(row_dict["vehicle_value"]),
-                safety_features=str(row_dict["safety_features"]),
-                anti_theft=str(row_dict["anti_theft"]),
-                color=str(row_dict["color"]),
-                driver_age=int(row_dict["driver_age"]),
-                driving_experience=int(row_dict["driving_experience"]),
-                license_age=int(row_dict["license_age"]),
-                previous_accidents=int(row_dict["previous_accidents"]),
-                previous_claims=int(row_dict["previous_claims"]),
-                traffic_violations=int(row_dict["traffic_violations"]),
-                usage_type=str(row_dict["usage_type"]),
-                annual_mileage=int(row_dict["annual_mileage"]),
-                city=str(row_dict["city"]),
-                region=str(row_dict["region"]),
-                previous_insurance=str(row_dict["previous_insurance"]),
+                make=str(row_dict["make"]), model=str(row_dict["model"]), year=int(row_dict["year"]),
+                vehicle_type=str(row_dict["vehicle_type"]), engine_cc=int(row_dict["engine_cc"]),
+                fuel_type=str(row_dict["fuel_type"]), vehicle_value=float(row_dict["vehicle_value"]),
+                safety_features=str(row_dict["safety_features"]), anti_theft=str(row_dict["anti_theft"]),
+                color=str(row_dict["color"]), driver_age=int(row_dict["driver_age"]),
+                driving_experience=int(row_dict["driving_experience"]), license_age=int(row_dict["license_age"]),
+                previous_accidents=int(row_dict["previous_accidents"]), previous_claims=int(row_dict["previous_claims"]),
+                traffic_violations=int(row_dict["traffic_violations"]), usage_type=str(row_dict["usage_type"]),
+                annual_mileage=int(row_dict["annual_mileage"]), city=str(row_dict["city"]),
+                region=str(row_dict["region"]), previous_insurance=str(row_dict["previous_insurance"]),
                 policy_lapses=int(row_dict["policy_lapses"]),
             )
         except (ValidationError, ValueError, KeyError) as e:
@@ -159,20 +154,52 @@ async def bulk_upload_vehicle_proposals(
 
         raw = validated.model_dump()
         try:
-            converted, result, risk_factors, positive_factors, summary = score_vehicle(raw)
-        except HTTPException as e:
-            results.append({"row": row_num, "status": "error", "reason": str(e.detail)})
+            converted = convert_raw_vehicle_proposal(raw)
+            result = vehicle_underwriting_model.predict(converted)
+            risk_factors, positive_factors = build_explanation(converted, vehicle_underwriting_model.meta)
+            summary = build_summary(result["risk_score"], risk_factors, positive_factors)
+        except KeyError as e:
+            results.append({"row": row_num, "status": "error", "reason": f"Invalid value for field: {e}"})
             continue
 
-        vehicle_id = insert_vehicle(
-            current_user.id, proposal_id, raw, converted, result,
-            risk_factors, positive_factors, summary,
-        )
-        results.append({"row": row_num, "status": "success", "vehicle_id": vehicle_id})
+        try:
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO vehicles (user_id, make, model, year, vehicle_type, engine_cc,
+                   fuel_type, vehicle_value, safety_features, anti_theft, color)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (current_user.id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
+                 raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
+                 converted["safety_features"], converted["anti_theft"], raw["color"]),
+            )
+            vehicle_id = cur.lastrowid
+            cur.execute(
+                """INSERT INTO proposals
+                   (full_name, insurance_type, raw_input, confidence, risk_score,
+                    reasoning_summary, risk_factors, positive_factors, status,
+                    document_blob, document_filename, document_mimetype,
+                    extracted_fields, validation_results, country_code, doc_type,
+                    user_id, vehicle_id)
+                   VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
+                 summary, json.dumps(risk_factors), json.dumps(positive_factors),
+                 doc_bytes, file.filename, file.content_type,
+                 json.dumps(extracted), json.dumps(val_results),
+                 country_code, doc_type, current_user.id, vehicle_id),
+            )
+            conn.commit()
+            proposal_id = cur.lastrowid
+            cur.close()
+            conn.close()
+        except Exception as e:
+            results.append({"row": row_num, "status": "error", "reason": f"DB error: {e}"})
+            continue
+
+        results.append({"row": row_num, "status": "success", "proposal_id": proposal_id, "vehicle_id": vehicle_id})
 
     succeeded = sum(1 for r in results if r["status"] == "success")
     return {
-        "proposal_id": proposal_id,
         "total_rows": len(df),
         "succeeded": succeeded,
         "failed": len(df) - succeeded,

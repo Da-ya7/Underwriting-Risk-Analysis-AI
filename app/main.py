@@ -359,21 +359,6 @@ def set_decision(
         raise HTTPException(status_code=422, detail="status must be APPROVED or REJECTED")
 
     conn = get_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT insurance_type FROM proposals WHERE id=%s", (proposal_id,))
-    check_row = cur.fetchone()
-    if check_row and check_row["insurance_type"] == "vehicle":
-        cur.close()
-        conn.close()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Proposal #{proposal_id} is a vehicle fleet proposal. "
-                   f"Decide per-vehicle at PATCH /api/v1/vehicle/vehicles/{{vehicle_id}}/decision instead.",
-        )
-    cur.close()
-    conn.close()
-
-    conn = get_connection()
     cur = conn.cursor()
     cur.execute("UPDATE proposals SET status=%s WHERE id=%s", (decision.status, proposal_id))
     conn.commit()

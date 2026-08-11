@@ -3,13 +3,18 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, R
 from pydantic import ValidationError
 
 from .schemas import RawVehicleProposalRequest, VehicleProposalSubmitResponse
-from .pipeline import (
-    get_open_proposal, score_vehicle, run_ocr_and_extract,
-    create_proposal_with_document, insert_vehicle,
-)
+from .conversion import convert_raw_vehicle_proposal
+from .model_service import vehicle_underwriting_model
+from .explain import build_explanation, build_summary
 from ..db import get_connection
 from ..auth.dependencies import get_current_user, require_role
 from ..auth.schemas import CurrentUser
+
+from ..document_validation.router import _decode_image, _preprocess_for_ocr
+from ..document_validation.llm_extract import extract_fields
+from ..document_validation.validator import validate_against_form
+from ..document_validation.schema_loader import load_schema, SchemaNotFoundError
+import pytesseract
 
 router = APIRouter(prefix="/api/v1/vehicle", tags=["vehicle"])
 
@@ -40,15 +45,31 @@ async def submit_vehicle_proposal(
     policy_lapses: int = Form(...),
     country_code: str = Form("IN"),
     doc_type: str = Form("drivers_license"),
-    file: UploadFile | None = File(
-        None,
-        description="Driving license — required ONLY for the first vehicle in "
-                    "a fleet proposal. Vehicles added afterward reuse the "
-                    "license already on file for that proposal.",
-    ),
+    file: UploadFile = File(...),
     current_user: CurrentUser = Depends(require_role("client")),
 ):
     full_name = current_user.full_name
+
+    # Duplicate-request guard: block a second submission for insurance_type='vehicle'
+    # while an earlier one from this user is still PENDING.
+    dup_conn = get_connection()
+    dup_cur = dup_conn.cursor(dictionary=True)
+    dup_cur.execute(
+        """SELECT id, status FROM proposals
+           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
+           LIMIT 1""",
+        (current_user.id,),
+    )
+    existing = dup_cur.fetchone()
+    dup_cur.close()
+    dup_conn.close()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"You already have a pending vehicle request "
+                   f"(id #{existing['id']}, status: {existing['status']}). "
+                   f"Wait for a decision before submitting another.",
+        )
 
     try:
         validated = RawVehicleProposalRequest(
@@ -66,84 +87,107 @@ async def submit_vehicle_proposal(
         raise HTTPException(status_code=422, detail=e.errors())
 
     raw = validated.model_dump()
-    converted, result, risk_factors, positive_factors, summary = score_vehicle(raw)
 
-    # ---- Fleet model: attach to an existing open (PENDING) proposal if the
-    # user has one; otherwise this vehicle is the first in a new proposal and
-    # a license document is required to create it. ----
-    open_proposal = get_open_proposal(current_user.id)
+    try:
+        converted = convert_raw_vehicle_proposal(raw)
+        result = vehicle_underwriting_model.predict(converted)
+        risk_factors, positive_factors = build_explanation(converted, vehicle_underwriting_model.meta)
+        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
 
-    if open_proposal:
-        proposal_id = open_proposal["id"]
-    else:
-        if file is None:
-            raise HTTPException(
-                status_code=422,
-                detail="A driving license file is required to start a new "
-                       "vehicle proposal (only for the first vehicle in a fleet).",
-            )
-        doc_bytes = await file.read()
-        extracted, val_results = run_ocr_and_extract(
-            doc_bytes, country_code, doc_type, full_name, driver_age
+    try:
+        schema = load_schema(country_code, doc_type)
+    except SchemaNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    doc_bytes = await file.read()
+    extracted, val_results = {}, []
+    try:
+        img = _decode_image(doc_bytes)
+    except Exception:
+        img = None
+    if img is not None:
+        processed = _preprocess_for_ocr(img)
+        ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+        ocr_text_regional = ""
+        schema_lang = schema.get("language", "eng")
+        if schema_lang != "eng":
+            try:
+                ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
+            except pytesseract.TesseractError:
+                pass
+        ocr_text = (
+            "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
+            f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
         )
-        proposal_id = create_proposal_with_document(
-            full_name, raw, current_user.id, doc_bytes, file.filename, file.content_type,
-            extracted, val_results, country_code, doc_type,
+        extracted = extract_fields(ocr_text, schema)
+        val_results = validate_against_form(
+            extracted, {"full_name": full_name, "age": driver_age}, schema
         )
 
-    vehicle_id = insert_vehicle(
-        current_user.id, proposal_id, raw, converted, result,
-        risk_factors, positive_factors, summary,
-    )
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO vehicles (user_id, make, model, year, vehicle_type,
+               engine_cc, fuel_type, vehicle_value, safety_features, anti_theft, color)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (current_user.id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
+             raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
+             converted["safety_features"], converted["anti_theft"], raw["color"]),
+        )
+        vehicle_id = cur.lastrowid
+
+        cur.execute(
+            """INSERT INTO proposals
+               (full_name, insurance_type, raw_input, confidence, risk_score,
+                reasoning_summary, risk_factors, positive_factors, status,
+                document_blob, document_filename, document_mimetype,
+                extracted_fields, validation_results, country_code, doc_type,
+                user_id, vehicle_id)
+               VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
+             summary, json.dumps(risk_factors), json.dumps(positive_factors),
+             doc_bytes, file.filename, file.content_type,
+             json.dumps(extracted), json.dumps(val_results),
+             country_code, doc_type, current_user.id, vehicle_id),
+        )
+        conn.commit()
+        proposal_id = cur.lastrowid
+        cur.close()
+        conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return VehicleProposalSubmitResponse(id=proposal_id, vehicle_id=vehicle_id, status="PENDING")
 
 
-# ---------- List vehicle proposals (fleets): client sees own only, underwriter sees all ----------
 @router.get("/proposals")
 def list_vehicle_proposals(current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     if current_user.role == "underwriter":
         cur.execute(
-            "SELECT id, full_name, status, created_at FROM proposals "
+            "SELECT id, full_name, status, created_at, vehicle_id, risk_score FROM proposals "
             "WHERE insurance_type='vehicle' ORDER BY created_at DESC"
         )
     else:
         cur.execute(
-            "SELECT id, full_name, status, created_at FROM proposals "
+            "SELECT id, full_name, status, created_at, vehicle_id, risk_score FROM proposals "
             "WHERE insurance_type='vehicle' AND user_id=%s ORDER BY created_at DESC",
             (current_user.id,),
         )
-    proposals = cur.fetchall()
-
-    if proposals:
-        ids = [p["id"] for p in proposals]
-        fmt = ",".join(["%s"] * len(ids))
-        cur.execute(
-            f"""SELECT proposal_id, COUNT(*) AS vehicle_count,
-                       COALESCE(SUM(vehicle_value), 0) AS total_value,
-                       SUM(CASE WHEN status IN ('PENDING','REJECTED') THEN 1 ELSE 0 END) AS flagged_count
-                FROM vehicles WHERE proposal_id IN ({fmt}) GROUP BY proposal_id""",
-            ids,
-        )
-        stats_by_id = {r["proposal_id"]: r for r in cur.fetchall()}
-    else:
-        stats_by_id = {}
-
+    rows = cur.fetchall()
     cur.close()
     conn.close()
-
-    for p in proposals:
-        p["created_at"] = str(p["created_at"])
-        stats = stats_by_id.get(p["id"], {"vehicle_count": 0, "total_value": 0, "flagged_count": 0})
-        p["vehicle_count"] = stats["vehicle_count"]
-        p["total_value"] = stats["total_value"]
-        p["flagged_count"] = stats["flagged_count"]
-    return proposals
+    for r in rows:
+        r["created_at"] = str(r["created_at"])
+    return rows
 
 
-# ---------- Vehicle proposal (fleet) detail — includes ALL vehicles ----------
 @router.get("/proposals/{proposal_id}")
 def get_vehicle_proposal(proposal_id: int, current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
@@ -159,22 +203,19 @@ def get_vehicle_proposal(proposal_id: int, current_user: CurrentUser = Depends(g
         raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
     raw = json.loads(row["raw_input"]) if isinstance(row["raw_input"], str) else row["raw_input"]
+    risk_factors = json.loads(row["risk_factors"]) if isinstance(row.get("risk_factors"), str) else row.get("risk_factors")
+    positive_factors = json.loads(row["positive_factors"]) if isinstance(row.get("positive_factors"), str) else row.get("positive_factors")
     extracted_fields = json.loads(row["extracted_fields"]) if isinstance(row.get("extracted_fields"), str) else row.get("extracted_fields")
     validation_results = json.loads(row["validation_results"]) if isinstance(row.get("validation_results"), str) else row.get("validation_results")
 
     vconn = get_connection()
     vcur = vconn.cursor(dictionary=True)
-    vcur.execute("SELECT * FROM vehicles WHERE proposal_id=%s ORDER BY created_at ASC", (proposal_id,))
-    vehicles = vcur.fetchall()
+    vcur.execute("SELECT * FROM vehicles WHERE id=%s", (row["vehicle_id"],))
+    vehicle = vcur.fetchone()
     vcur.close()
     vconn.close()
-
-    for v in vehicles:
-        v["created_at"] = str(v["created_at"])
-        if isinstance(v.get("risk_factors"), str):
-            v["risk_factors"] = json.loads(v["risk_factors"])
-        if isinstance(v.get("positive_factors"), str):
-            v["positive_factors"] = json.loads(v["positive_factors"])
+    if vehicle:
+        vehicle["created_at"] = str(vehicle["created_at"])
 
     return {
         "id": row["id"],
@@ -182,6 +223,11 @@ def get_vehicle_proposal(proposal_id: int, current_user: CurrentUser = Depends(g
         "insurance_type": row["insurance_type"],
         "status": row["status"],
         "created_at": str(row["created_at"]),
+        "confidence": row.get("confidence"),
+        "risk_score": row.get("risk_score"),
+        "reasoning_summary": row.get("reasoning_summary"),
+        "risk_factors": risk_factors,
+        "positive_factors": positive_factors,
         "document_filename": row.get("document_filename"),
         "document_mimetype": row.get("document_mimetype"),
         "extracted_fields": extracted_fields,
@@ -189,49 +235,10 @@ def get_vehicle_proposal(proposal_id: int, current_user: CurrentUser = Depends(g
         "country_code": row.get("country_code"),
         "doc_type": row.get("doc_type"),
         "raw_input": raw,
-        "vehicles": vehicles,
+        "vehicle": vehicle,
     }
 
 
-# ---------- UNDERWRITER-ONLY: per-vehicle decision ----------
-@router.patch("/vehicles/{vehicle_id}/decision")
-def set_vehicle_decision(
-    vehicle_id: int,
-    decision: dict,
-    current_user: CurrentUser = Depends(require_role("underwriter")),
-):
-    status = decision.get("status")
-    if status not in ("APPROVED", "REJECTED"):
-        raise HTTPException(status_code=422, detail="status must be APPROVED or REJECTED")
-
-    conn = get_connection()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT proposal_id FROM vehicles WHERE id=%s", (vehicle_id,))
-    vrow = cur.fetchone()
-    if not vrow:
-        cur.close()
-        conn.close()
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-
-    cur.execute("UPDATE vehicles SET status=%s WHERE id=%s", (status, vehicle_id))
-    conn.commit()
-
-    proposal_id = vrow["proposal_id"]
-    cur.execute(
-        "SELECT COUNT(*) AS pending_count FROM vehicles WHERE proposal_id=%s AND status='PENDING'",
-        (proposal_id,),
-    )
-    pending_count = cur.fetchone()["pending_count"]
-    if pending_count == 0:
-        cur.execute("UPDATE proposals SET status='CLOSED' WHERE id=%s", (proposal_id,))
-        conn.commit()
-
-    cur.close()
-    conn.close()
-    return {"vehicle_id": vehicle_id, "status": status, "proposal_id": proposal_id}
-
-
-# ---------- Raw document bytes (view/download) ----------
 @router.get("/proposals/{proposal_id}/document")
 def get_vehicle_proposal_document(proposal_id: int, current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
