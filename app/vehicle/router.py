@@ -155,6 +155,10 @@ async def submit_vehicle_proposal(
         )
         conn.commit()
         proposal_id = cur.lastrowid
+
+        # version_root_id: brand-new proposal, becomes its own root.
+        cur.execute("UPDATE proposals SET version_root_id=%s WHERE id=%s", (proposal_id, proposal_id))
+        conn.commit()
         cur.close()
         conn.close()
     except HTTPException:
@@ -165,19 +169,138 @@ async def submit_vehicle_proposal(
     return VehicleProposalSubmitResponse(id=proposal_id, vehicle_id=vehicle_id, status="PENDING")
 
 
+# ---------- CLIENT: edit + resubmit a vehicle proposal (creates a NEW version) ----------
+# Same versioning rule as the life module's edit endpoint: inserts a new
+# proposal row + a new vehicles row (keeps old vehicle row too, for history),
+# links via version_root_id, marks the old proposal SUPERSEDED. Document/OCR
+# fields carried over from the old row unchanged (no re-upload required).
+@router.post("/proposals/{proposal_id}/edit", response_model=VehicleProposalSubmitResponse)
+def edit_vehicle_proposal(
+    proposal_id: int,
+    make: str = Form(...),
+    model: str = Form(...),
+    year: int = Form(...),
+    vehicle_type: str = Form(...),
+    engine_cc: int = Form(...),
+    fuel_type: str = Form(...),
+    vehicle_value: float = Form(...),
+    safety_features: str = Form(...),
+    anti_theft: str = Form(...),
+    color: str = Form(...),
+    driver_age: int = Form(...),
+    driving_experience: int = Form(...),
+    license_age: int = Form(...),
+    previous_accidents: int = Form(...),
+    previous_claims: int = Form(...),
+    traffic_violations: int = Form(...),
+    usage_type: str = Form(...),
+    annual_mileage: int = Form(...),
+    city: str = Form(...),
+    region: str = Form(...),
+    previous_insurance: str = Form(...),
+    policy_lapses: int = Form(...),
+    current_user: CurrentUser = Depends(require_role("client")),
+):
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT * FROM proposals WHERE id=%s AND insurance_type='vehicle'", (proposal_id,))
+    old = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not old:
+        raise HTTPException(status_code=404, detail="Vehicle proposal not found")
+    if old["user_id"] != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to this proposal")
+
+    root_id = old["version_root_id"] or old["id"]
+    full_name = current_user.full_name
+
+    try:
+        validated = RawVehicleProposalRequest(
+            make=make, model=model, year=year, vehicle_type=vehicle_type,
+            engine_cc=engine_cc, fuel_type=fuel_type, vehicle_value=vehicle_value,
+            safety_features=safety_features, anti_theft=anti_theft, color=color,
+            driver_age=driver_age, driving_experience=driving_experience,
+            license_age=license_age, previous_accidents=previous_accidents,
+            previous_claims=previous_claims, traffic_violations=traffic_violations,
+            usage_type=usage_type, annual_mileage=annual_mileage,
+            city=city, region=region, previous_insurance=previous_insurance,
+            policy_lapses=policy_lapses,
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    raw = validated.model_dump()
+
+    try:
+        converted = convert_raw_vehicle_proposal(raw)
+        result = vehicle_underwriting_model.predict(converted)
+        risk_factors, positive_factors = build_explanation(converted, vehicle_underwriting_model.meta)
+        summary = build_summary(result["risk_score"], risk_factors, positive_factors)
+    except KeyError as e:
+        raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
+
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO vehicles (user_id, make, model, year, vehicle_type,
+               engine_cc, fuel_type, vehicle_value, safety_features, anti_theft, color)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (current_user.id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
+             raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
+             converted["safety_features"], converted["anti_theft"], raw["color"]),
+        )
+        new_vehicle_id = cur.lastrowid
+
+        cur.execute(
+            """INSERT INTO proposals
+               (full_name, insurance_type, raw_input, confidence, risk_score,
+                reasoning_summary, risk_factors, positive_factors, status,
+                document_blob, document_filename, document_mimetype,
+                extracted_fields, validation_results, country_code, doc_type,
+                user_id, vehicle_id, version_root_id)
+               VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
+             summary, json.dumps(risk_factors), json.dumps(positive_factors),
+             old["document_blob"], old["document_filename"], old["document_mimetype"],
+             old["extracted_fields"], old["validation_results"],
+             old["country_code"], old["doc_type"], current_user.id, new_vehicle_id, root_id),
+        )
+        conn.commit()
+        new_proposal_id = cur.lastrowid
+
+        cur.execute("UPDATE proposals SET status='SUPERSEDED' WHERE id=%s", (proposal_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return VehicleProposalSubmitResponse(id=new_proposal_id, vehicle_id=new_vehicle_id, status="PENDING")
+
+
 @router.get("/proposals")
 def list_vehicle_proposals(current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
+    # Latest-version-only: hides SUPERSEDED (edited-over) rows automatically.
     if current_user.role == "underwriter":
         cur.execute(
-            "SELECT id, full_name, status, created_at, vehicle_id, risk_score FROM proposals "
-            "WHERE insurance_type='vehicle' ORDER BY created_at DESC"
+            "SELECT id, full_name, status, created_at, vehicle_id, risk_score, fleet_group_id FROM proposals p "
+            "WHERE insurance_type='vehicle' "
+            "AND id = (SELECT MAX(id) FROM proposals p2 WHERE p2.version_root_id = p.version_root_id) "
+            "ORDER BY created_at DESC"
         )
     else:
         cur.execute(
-            "SELECT id, full_name, status, created_at, vehicle_id, risk_score FROM proposals "
-            "WHERE insurance_type='vehicle' AND user_id=%s ORDER BY created_at DESC",
+            "SELECT id, full_name, status, created_at, vehicle_id, risk_score, fleet_group_id FROM proposals p "
+            "WHERE insurance_type='vehicle' AND user_id=%s "
+            "AND id = (SELECT MAX(id) FROM proposals p2 WHERE p2.version_root_id = p.version_root_id) "
+            "ORDER BY created_at DESC",
             (current_user.id,),
         )
     rows = cur.fetchall()

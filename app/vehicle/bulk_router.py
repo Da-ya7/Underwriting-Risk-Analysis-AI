@@ -14,6 +14,7 @@ usage_type, annual_mileage, city, region, previous_insurance, policy_lapses
 """
 import io
 import json
+import uuid
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
 from pydantic import ValidationError
@@ -110,29 +111,37 @@ async def bulk_upload_vehicle_proposals(
         extracted = extract_fields(ocr_text, schema)
         val_results = validate_against_form(extracted, {"full_name": full_name, "age": first_driver_age}, schema)
 
+    # Duplicate-request guard: checked ONCE for the whole sheet, not per-row.
+    # BUG FIX: was previously inside the loop -- row 1's insert set
+    # status='PENDING', so row 2's check found row 1 and skipped itself,
+    # then row 3 found row 1 too, etc. Only row 1 ever got created.
+    dup_conn = get_connection()
+    dup_cur = dup_conn.cursor(dictionary=True)
+    dup_cur.execute(
+        """SELECT id, status FROM proposals
+           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
+           LIMIT 1""",
+        (current_user.id,),
+    )
+    existing = dup_cur.fetchone()
+    dup_cur.close()
+    dup_conn.close()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"You already have a pending vehicle proposal (id #{existing['id']}). "
+                   f"Wait for a decision before uploading a new sheet.",
+        )
+
+    # fleet_group_id: shared across every row in this sheet when there's
+    # more than 1 row (matches batch_router.py's rule -- lone row stays
+    # ungrouped, same as a single-submit).
+    fleet_group_id = str(uuid.uuid4()) if len(df) > 1 else None
+
     results = []
     for idx, row in df.iterrows():
         row_num = idx + 2
         row_dict = row.to_dict()
-
-        # Duplicate-request guard: same rule as single-submit.
-        dup_conn = get_connection()
-        dup_cur = dup_conn.cursor(dictionary=True)
-        dup_cur.execute(
-            """SELECT id, status FROM proposals
-               WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
-               LIMIT 1""",
-            (current_user.id,),
-        )
-        existing = dup_cur.fetchone()
-        dup_cur.close()
-        dup_conn.close()
-        if existing:
-            results.append({
-                "row": row_num, "status": "skipped",
-                "reason": f"Pending vehicle proposal already exists (id #{existing['id']})",
-            })
-            continue
 
         try:
             validated = RawVehicleProposalRequest(
@@ -180,16 +189,19 @@ async def bulk_upload_vehicle_proposals(
                     reasoning_summary, risk_factors, positive_factors, status,
                     document_blob, document_filename, document_mimetype,
                     extracted_fields, validation_results, country_code, doc_type,
-                    user_id, vehicle_id)
-                   VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    user_id, vehicle_id, fleet_group_id)
+                   VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
                  summary, json.dumps(risk_factors), json.dumps(positive_factors),
                  doc_bytes, file.filename, file.content_type,
                  json.dumps(extracted), json.dumps(val_results),
-                 country_code, doc_type, current_user.id, vehicle_id),
+                 country_code, doc_type, current_user.id, vehicle_id, fleet_group_id),
             )
             conn.commit()
             proposal_id = cur.lastrowid
+
+            cur.execute("UPDATE proposals SET version_root_id=%s WHERE id=%s", (proposal_id, proposal_id))
+            conn.commit()
             cur.close()
             conn.close()
         except Exception as e:
@@ -203,5 +215,6 @@ async def bulk_upload_vehicle_proposals(
         "total_rows": len(df),
         "succeeded": succeeded,
         "failed": len(df) - succeeded,
+        "fleet_group_id": fleet_group_id,
         "results": results,
     }

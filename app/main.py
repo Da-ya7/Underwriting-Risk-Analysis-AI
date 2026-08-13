@@ -223,6 +223,12 @@ async def submit_proposal(
         )
         conn.commit()
         new_id = cur.lastrowid
+
+        # version_root_id: this is a brand-new proposal (not an edit), so it
+        # becomes its own root. Can't set this in the INSERT above -- MySQL
+        # doesn't know the auto-increment id until after insert.
+        cur.execute("UPDATE proposals SET version_root_id=%s WHERE id=%s", (new_id, new_id))
+        conn.commit()
         cur.close()
         conn.close()
 
@@ -235,6 +241,111 @@ async def submit_proposal(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------- CLIENT: edit + resubmit a proposal (creates a NEW version) ----------
+# Mentor's "tran_id" versioning: this does NOT overwrite the old row. It
+# inserts a brand new proposal row (new id/"tran_id"), links it to the same
+# version_root_id as the original, marks the OLD row status='SUPERSEDED',
+# and re-runs the risk model on the updated fields. Old row stays in the DB
+# untouched (audit trail) but is hidden from normal list views. Document/
+# OCR fields are carried over unchanged from the old row -- editing form
+# fields doesn't require re-uploading the ID document every time.
+@app.post("/api/v1/proposals/{proposal_id}/edit", response_model=ProposalSubmitResponse)
+def edit_proposal(
+    proposal_id: int,
+    age: int = Form(...),
+    annual_income: float = Form(...),
+    sum_assured: float = Form(...),
+    height_cm: float = Form(...),
+    weight_kg: float = Form(...),
+    smoker: str = Form(...),
+    alcohol_consumption: str = Form(...),
+    pre_existing_disease: str = Form(...),
+    family_medical_history: str = Form(...),
+    occupation: str = Form(...),
+    credit_score: int = Form(...),
+    num_previous_claims: int = Form(...),
+    years_with_insurer: int = Form(...),
+    current_user: CurrentUser = Depends(require_role("client")),
+):
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute("SELECT * FROM proposals WHERE id=%s", (proposal_id,))
+    old = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not old:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if old["user_id"] != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have access to this proposal")
+    if old["insurance_type"] == "vehicle":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Proposal #{proposal_id} is a vehicle proposal. "
+                   f"Use POST /api/v1/vehicle/proposals/{proposal_id}/edit instead.",
+        )
+
+    root_id = old["version_root_id"] or old["id"]  # backward-compat if somehow still NULL
+
+    try:
+        validated = ClientProposalSubmit(
+            full_name=current_user.full_name, insurance_type=old["insurance_type"], age=age,
+            annual_income=annual_income, sum_assured=sum_assured,
+            height_cm=height_cm, weight_kg=weight_kg, smoker=smoker,
+            alcohol_consumption=alcohol_consumption,
+            pre_existing_disease=pre_existing_disease,
+            family_medical_history=family_medical_history,
+            occupation=occupation, credit_score=credit_score,
+            num_previous_claims=num_previous_claims,
+            years_with_insurer=years_with_insurer,
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    raw = validated.model_dump()
+    raw.pop("full_name")
+    raw.pop("insurance_type")
+
+    try:
+        converted = convert_raw_proposal(raw)
+        applicant = ProposalRequest(**converted).model_dump()
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
+
+    result = underwriting_model.predict(applicant)
+    risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
+    summary = build_summary(result["risk_score"], risk_factors, positive_factors)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO proposals
+           (full_name, insurance_type, raw_input, confidence, risk_score,
+            reasoning_summary, risk_factors, positive_factors, status,
+            document_blob, document_filename, document_mimetype,
+            extracted_fields, validation_results, country_code, doc_type,
+            user_id, version_root_id)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (
+            current_user.full_name, old["insurance_type"], json.dumps(raw),
+            result["risk_confidence"], result["risk_score"],
+            summary, json.dumps(risk_factors), json.dumps(positive_factors),
+            old["document_blob"], old["document_filename"], old["document_mimetype"],
+            old["extracted_fields"], old["validation_results"],
+            old["country_code"], old["doc_type"], current_user.id, root_id,
+        ),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+
+    cur.execute("UPDATE proposals SET status='SUPERSEDED' WHERE id=%s", (proposal_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return ProposalSubmitResponse(id=new_id, status="PENDING")
+
+
 # ---------- List proposals: client sees own only, underwriter sees all ----------
 @app.get("/api/v1/proposals", response_model=list[ProposalListItem])
 def list_proposals(current_user: CurrentUser = Depends(get_current_user)):
@@ -244,13 +355,22 @@ def list_proposals(current_user: CurrentUser = Depends(get_current_user)):
         # Vehicle proposals have their own dashboard (GET /api/v1/vehicle/proposals)
         # and don't fit ProposalDetail's life/health-only response shape -- exclude
         # them here so "View" links on this list always resolve.
+        # Latest-version-only: a row only shows if it's the highest id within
+        # its version_root_id group -- hides SUPERSEDED (edited-over) rows
+        # without needing to filter on status (works even if that flag is
+        # ever missed on some path).
         cur.execute(
-            "SELECT id, full_name, insurance_type, status, created_at FROM proposals "
-            "WHERE insurance_type != 'vehicle' ORDER BY created_at DESC"
+            "SELECT id, full_name, insurance_type, status, created_at FROM proposals p "
+            "WHERE insurance_type != 'vehicle' "
+            "AND id = (SELECT MAX(id) FROM proposals p2 WHERE p2.version_root_id = p.version_root_id) "
+            "ORDER BY created_at DESC"
         )
     else:
         cur.execute(
-            "SELECT id, full_name, insurance_type, status, created_at FROM proposals WHERE user_id=%s ORDER BY created_at DESC",
+            "SELECT id, full_name, insurance_type, status, created_at FROM proposals p "
+            "WHERE user_id=%s "
+            "AND id = (SELECT MAX(id) FROM proposals p2 WHERE p2.version_root_id = p.version_root_id) "
+            "ORDER BY created_at DESC",
             (current_user.id,),
         )
     rows = cur.fetchall()

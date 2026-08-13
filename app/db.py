@@ -122,6 +122,21 @@ def init_db():
     _add_column_if_missing(cur, "proposals", "vehicle_id INT")
     conn.commit()
 
+    # fleet_group_id: NULL for a single-vehicle submission. When N vehicles
+    # are submitted together (batch/bulk), every resulting proposal row
+    # shares the same fleet_group_id (a UUID generated once per submission
+    # call) -- lets the frontend group them into "one proposal" while each
+    # vehicle still keeps its own independent AI risk_score/factors row.
+    _add_column_if_missing(cur, "proposals", "fleet_group_id VARCHAR(36)")
+    conn.commit()
+
+    try:
+        cur.execute("CREATE INDEX idx_proposals_fleet_group ON proposals (fleet_group_id)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
     # Index speeds up the duplicate-proposal check (user_id + insurance_type + status)
     try:
         cur.execute("CREATE INDEX idx_proposals_user_insurance ON proposals (user_id, insurance_type, status)")
@@ -160,6 +175,30 @@ def init_db():
         conn.commit()
     except Error as e:
         if e.errno != 1826:  # Duplicate foreign key constraint name -> already exists, fine
+            raise
+
+    # version_root_id: mentor's "tran_id" concept. Every proposal's FIRST
+    # submission gets version_root_id = its own id (set right after insert,
+    # in the submit endpoints, since MySQL can't self-reference during the
+    # same INSERT). When a client edits and resubmits, the NEW row keeps
+    # the SAME version_root_id as the original -- so "give me the latest
+    # version of proposal X" = the row with MAX(id) sharing that root.
+    # Old edited-over rows are marked status='SUPERSEDED' and hidden from
+    # normal list views, but never deleted (audit trail).
+    _add_column_if_missing(cur, "proposals", "version_root_id INT")
+    conn.commit()
+
+    # Backfill: any row from before this column existed has version_root_id
+    # NULL -- treat it as its own root (a proposal that's never been edited).
+    # Safe to re-run: only touches rows still NULL.
+    cur.execute("UPDATE proposals SET version_root_id = id WHERE version_root_id IS NULL")
+    conn.commit()
+
+    try:
+        cur.execute("CREATE INDEX idx_proposals_version_root ON proposals (version_root_id)")
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
             raise
 
     cur.close()
