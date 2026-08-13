@@ -27,6 +27,8 @@ from .auth.router import router as auth_router
 from .vehicle.router import router as vehicle_router
 from .vehicle.bulk_router import router as vehicle_bulk_router
 from .vehicle.batch_router import router as vehicle_batch_router
+from .vehicle.quick_router import router as vehicle_quick_router
+from .client_router import router as client_router
 from .auth.dependencies import get_current_user, require_role
 from .auth.schemas import CurrentUser
 
@@ -47,6 +49,8 @@ app.include_router(auth_router)
 app.include_router(vehicle_router)
 app.include_router(vehicle_bulk_router)
 app.include_router(vehicle_batch_router)
+app.include_router(vehicle_quick_router)
+app.include_router(client_router)
 
 
 @app.on_event("startup")
@@ -237,7 +241,13 @@ def list_proposals(current_user: CurrentUser = Depends(get_current_user)):
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     if current_user.role == "underwriter":
-        cur.execute("SELECT id, full_name, insurance_type, status, created_at FROM proposals ORDER BY created_at DESC")
+        # Vehicle proposals have their own dashboard (GET /api/v1/vehicle/proposals)
+        # and don't fit ProposalDetail's life/health-only response shape -- exclude
+        # them here so "View" links on this list always resolve.
+        cur.execute(
+            "SELECT id, full_name, insurance_type, status, created_at FROM proposals "
+            "WHERE insurance_type != 'vehicle' ORDER BY created_at DESC"
+        )
     else:
         cur.execute(
             "SELECT id, full_name, insurance_type, status, created_at FROM proposals WHERE user_id=%s ORDER BY created_at DESC",
