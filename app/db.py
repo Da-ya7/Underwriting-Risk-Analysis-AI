@@ -174,7 +174,9 @@ def init_db():
         """)
         conn.commit()
     except Error as e:
-        if e.errno != 1826:  # Duplicate foreign key constraint name -> already exists, fine
+        # Dup FK constraint -> already exists, fine.
+        # MySQL: errno 1826. MariaDB: errno 1005 wrapping "121" in msg.
+        if not (e.errno == 1826 or (e.errno == 1005 and "121" in str(e))):
             raise
 
     # version_root_id: mentor's "tran_id" concept. Every proposal's FIRST

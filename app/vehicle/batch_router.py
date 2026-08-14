@@ -92,8 +92,8 @@ def submit_vehicle_proposals_batch(
                 """INSERT INTO proposals
                    (full_name, insurance_type, raw_input, confidence, risk_score,
                     reasoning_summary, risk_factors, positive_factors, status,
-                    user_id, vehicle_id, fleet_group_id)
-                   VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s)""",
+                    user_id, vehicle_id, fleet_group_id, country_code, doc_type)
+                   VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,NULL,NULL)""",
                 (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
                  summary, json.dumps(risk_factors), json.dumps(positive_factors),
                  current_user.id, vehicle_id, fleet_group_id),
