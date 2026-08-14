@@ -1,5 +1,5 @@
 import os
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Query
 from fastapi.security import OAuth2PasswordBearer
 
 from .security import decode_access_token
@@ -14,9 +14,17 @@ AUTH_DISABLED = os.getenv("AUTH_DISABLED", "false").lower() == "true"
 _DEV_USER = CurrentUser(id=1, full_name="Dev User", email="dev@local", role="underwriter")
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    token_qs: str | None = Query(default=None, alias="token"),
+) -> CurrentUser:
     if AUTH_DISABLED:
         return _DEV_USER
+
+    # Plain <a href> / <img src> links (document preview) can't set an
+    # Authorization header — allow the same JWT to be passed as ?token=
+    # for those GET requests only. Header takes priority when both present.
+    effective_token = token or token_qs
 
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -24,7 +32,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    payload = decode_access_token(token)
+    payload = decode_access_token(effective_token) if effective_token else None
     if payload is None:
         raise credentials_exception
 
