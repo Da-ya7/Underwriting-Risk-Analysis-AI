@@ -108,7 +108,16 @@ def _is_risky(feature: str, value: float, thresholds: dict) -> bool:
     return False
 
 
-def build_explanation(applicant: dict, feature_meta: dict) -> tuple[list[dict], list[dict]]:
+def build_explanation(applicant: dict, feature_meta: dict, only_features: set | None = None) -> tuple[list[dict], list[dict]]:
+    """
+    only_features: if given, restrict the reasoning (risk_factors/positive_factors)
+    to this subset of feature_meta["features"]. Used by the Quick Check endpoint,
+    which fills unfielded model inputs (engine_cc, safety_features, anti_theft,
+    fuel_type, license_age, traffic_violations, annual_mileage, policy_lapses)
+    with population-average defaults purely so the model has a full vector to
+    score -- those defaulted values must never surface as "reasons" since the
+    underwriter never actually supplied them.
+    """
     importances = feature_meta["importances"]
     thresholds = feature_meta["risk_thresholds"]
 
@@ -116,6 +125,8 @@ def build_explanation(applicant: dict, feature_meta: dict) -> tuple[list[dict], 
     scored_positive = []
 
     for feature in feature_meta["features"]:
+        if only_features is not None and feature not in only_features:
+            continue
         value = applicant[feature]
         weight = importances.get(feature, 0)
         risky = _is_risky(feature, value, thresholds)
