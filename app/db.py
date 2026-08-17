@@ -203,6 +203,51 @@ def init_db():
         if e.errno != 1061:
             raise
 
+    # updated_at: bumped automatically whenever a proposal row is edited
+    # in place (vehicle edit flow). NULL for rows never edited.
+    _add_column_if_missing(
+        cur, "proposals",
+        "updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP",
+    )
+    conn.commit()
+
+    # Same tracking on the vehicles side (edit endpoint updates this row
+    # in place too -- see app/vehicle/router.py edit_vehicle_proposal).
+    _add_column_if_missing(
+        cur, "vehicles",
+        "updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP",
+    )
+    conn.commit()
+
+    # vehicle_proposal_history: hidden audit trail for in-place vehicle
+    # proposal edits. Unlike the old version_root_id/SUPERSEDED scheme
+    # (still used by health/life edits), vehicle edits now UPDATE the
+    # existing proposals + vehicles rows directly (same id, same policy
+    # number) -- this table is where the pre-edit snapshot goes instead,
+    # so nothing is lost, it's just not a user-visible "old proposal" row
+    # anymore.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vehicle_proposal_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            proposal_id INT NOT NULL,
+            vehicle_id INT,
+            snapshot JSON NOT NULL,
+            edited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
+    try:
+        cur.execute(
+            "CREATE INDEX idx_vehicle_proposal_history_proposal_id "
+            "ON vehicle_proposal_history (proposal_id)"
+        )
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
     cur.close()
     conn.close()
 

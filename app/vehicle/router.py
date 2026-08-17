@@ -169,11 +169,13 @@ async def submit_vehicle_proposal(
     return VehicleProposalSubmitResponse(id=proposal_id, vehicle_id=vehicle_id, status="PENDING")
 
 
-# ---------- CLIENT: edit + resubmit a vehicle proposal (creates a NEW version) ----------
-# Same versioning rule as the life module's edit endpoint: inserts a new
-# proposal row + a new vehicles row (keeps old vehicle row too, for history),
-# links via version_root_id, marks the old proposal SUPERSEDED. Document/OCR
-# fields carried over from the old row unchanged (no re-upload required).
+# ---------- CLIENT: edit + resubmit a vehicle proposal (IN-PLACE update) ----------
+# Unlike the health/life edit endpoint, this does NOT create a new proposal
+# row. Same id, same policy number, same vehicle_id -- the proposals and
+# vehicles rows are UPDATEd directly. The pre-edit values (both rows) are
+# snapshotted into vehicle_proposal_history first, so old data isn't lost,
+# it's just no longer a separate visible "proposal" in the client's list.
+# Document/OCR fields are untouched (no re-upload required).
 @router.post("/proposals/{proposal_id}/edit", response_model=VehicleProposalSubmitResponse)
 def edit_vehicle_proposal(
     proposal_id: int,
@@ -205,6 +207,10 @@ def edit_vehicle_proposal(
     cur = conn.cursor(dictionary=True)
     cur.execute("SELECT * FROM proposals WHERE id=%s AND insurance_type='vehicle'", (proposal_id,))
     old = cur.fetchone()
+    old_vehicle = None
+    if old and old.get("vehicle_id"):
+        cur.execute("SELECT * FROM vehicles WHERE id=%s", (old["vehicle_id"],))
+        old_vehicle = cur.fetchone()
     cur.close()
     conn.close()
 
@@ -213,7 +219,6 @@ def edit_vehicle_proposal(
     if old["user_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
-    root_id = old["version_root_id"] or old["id"]
     full_name = current_user.full_name
 
     try:
@@ -244,34 +249,49 @@ def edit_vehicle_proposal(
     try:
         conn = get_connection()
         cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO vehicles (user_id, make, model, year, vehicle_type,
-               engine_cc, fuel_type, vehicle_value, safety_features, anti_theft, color)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (current_user.id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
-             raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
-             converted["safety_features"], converted["anti_theft"], raw["color"]),
-        )
-        new_vehicle_id = cur.lastrowid
 
+        # Snapshot pre-edit state (proposal + vehicle rows) before overwriting.
+        snapshot = {"proposal": old, "vehicle": old_vehicle}
         cur.execute(
-            """INSERT INTO proposals
-               (full_name, insurance_type, raw_input, confidence, risk_score,
-                reasoning_summary, risk_factors, positive_factors, status,
-                document_blob, document_filename, document_mimetype,
-                extracted_fields, validation_results, country_code, doc_type,
-                user_id, vehicle_id, version_root_id)
-               VALUES (%s,'vehicle',%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            """INSERT INTO vehicle_proposal_history (proposal_id, vehicle_id, snapshot)
+               VALUES (%s,%s,%s)""",
+            (proposal_id, old.get("vehicle_id"), json.dumps(snapshot, default=str)),
+        )
+
+        # Update the existing vehicle row in place (same vehicle_id).
+        if old.get("vehicle_id"):
+            cur.execute(
+                """UPDATE vehicles SET make=%s, model=%s, year=%s, vehicle_type=%s,
+                   engine_cc=%s, fuel_type=%s, vehicle_value=%s, safety_features=%s,
+                   anti_theft=%s, color=%s WHERE id=%s""",
+                (raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
+                 raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
+                 converted["safety_features"], converted["anti_theft"], raw["color"],
+                 old["vehicle_id"]),
+            )
+            vehicle_id = old["vehicle_id"]
+        else:
+            cur.execute(
+                """INSERT INTO vehicles (user_id, make, model, year, vehicle_type,
+                   engine_cc, fuel_type, vehicle_value, safety_features, anti_theft, color)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (current_user.id, raw["make"], raw["model"], raw["year"], raw["vehicle_type"],
+                 raw["engine_cc"], raw["fuel_type"], raw["vehicle_value"],
+                 converted["safety_features"], converted["anti_theft"], raw["color"]),
+            )
+            vehicle_id = cur.lastrowid
+
+        # Update the existing proposal row in place (same id, same policy number).
+        # Re-scored + back to PENDING since the applicant data changed.
+        cur.execute(
+            """UPDATE proposals SET full_name=%s, raw_input=%s, confidence=%s,
+               risk_score=%s, reasoning_summary=%s, risk_factors=%s,
+               positive_factors=%s, status='PENDING', vehicle_id=%s
+               WHERE id=%s""",
             (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
              summary, json.dumps(risk_factors), json.dumps(positive_factors),
-             old["document_blob"], old["document_filename"], old["document_mimetype"],
-             old["extracted_fields"], old["validation_results"],
-             old["country_code"], old["doc_type"], current_user.id, new_vehicle_id, root_id),
+             vehicle_id, proposal_id),
         )
-        conn.commit()
-        new_proposal_id = cur.lastrowid
-
-        cur.execute("UPDATE proposals SET status='SUPERSEDED' WHERE id=%s", (proposal_id,))
         conn.commit()
         cur.close()
         conn.close()
@@ -280,7 +300,7 @@ def edit_vehicle_proposal(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return VehicleProposalSubmitResponse(id=new_proposal_id, vehicle_id=new_vehicle_id, status="PENDING")
+    return VehicleProposalSubmitResponse(id=proposal_id, vehicle_id=vehicle_id, status="PENDING")
 
 
 @router.get("/proposals")
