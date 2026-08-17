@@ -49,6 +49,9 @@ def signup(payload: SignupRequest):
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest):
+    if payload.role not in ALLOWED_ROLES:
+        raise HTTPException(status_code=422, detail=f"role must be one of {ALLOWED_ROLES}")
+
     conn = get_connection()
     cur = conn.cursor(dictionary=True)
     cur.execute("SELECT id, full_name, password_hash, role FROM users WHERE email=%s", (payload.email,))
@@ -64,6 +67,18 @@ def login(payload: LoginRequest):
         raise invalid
     if not verify_password(payload.password, row["password_hash"]):
         raise invalid
+
+    # Role-based login enforcement: the role picked on the login screen
+    # (Client / Underwriter box) must match the account's actual role.
+    # A client account cannot sign in through the Underwriter tab and
+    # vice versa — password is already verified above, so this message
+    # is safe to be explicit (the caller already proved account ownership).
+    if row["role"] != payload.role:
+        raise HTTPException(
+            status_code=403,
+            detail=f"This account is registered as '{row['role']}'. "
+                   f"Please select '{row['role']}' on the login screen.",
+        )
 
     token = create_access_token({"sub": str(row["id"])})
     return TokenResponse(access_token=token, role=row["role"], full_name=row["full_name"])

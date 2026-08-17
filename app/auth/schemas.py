@@ -11,6 +11,7 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+    role: str = Field(..., description="Role selected on the login screen: client or underwriter")
 
 
 class TokenResponse(BaseModel):
