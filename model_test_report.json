@@ -1,0 +1,214 @@
+{
+  "health_model": {
+    "accuracy": 0.8135,
+    "precision": 0.8368600682593856,
+    "recall": 0.9014705882352941,
+    "f1": 0.8679646017699115,
+    "roc_auc": 0.8727619485294118,
+    "cv_auc_mean": 0.8755086167279412,
+    "cv_auc_std": 0.00401004187780703,
+    "latency_single_ms": 7.421923000074457,
+    "confusion_matrix": [
+      [
+        401,
+        239
+      ],
+      [
+        134,
+        1226
+      ]
+    ]
+  },
+  "vehicle_model": {
+    "accuracy": 0.8895,
+    "precision": 0.8266978922716628,
+    "recall": 0.706,
+    "f1": 0.761596548004315,
+    "roc_auc": 0.9505986666666666,
+    "cv_auc_mean": 0.9460877333333334,
+    "cv_auc_std": 0.0013133584836846944,
+    "latency_single_ms": 0.48829850013135,
+    "confusion_matrix": [
+      [
+        1426,
+        74
+      ],
+      [
+        147,
+        353
+      ]
+    ]
+  },
+  "checks": [
+    {
+      "name": "Health: model + meta load",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Health: feature columns present in data",
+      "status": "PASS",
+      "detail": "12 features"
+    },
+    {
+      "name": "Health: inference completes without error",
+      "status": "PASS",
+      "detail": "2000 rows in 51.8ms"
+    },
+    {
+      "name": "Health: ROC-AUC >= 0.7",
+      "status": "PASS",
+      "detail": "0.8728"
+    },
+    {
+      "name": "Health: F1 >= 0.55",
+      "status": "PASS",
+      "detail": "0.8680"
+    },
+    {
+      "name": "Health: class balance reasonable",
+      "status": "PASS",
+      "detail": "ratio 2.12:1 -> {1: np.float64(0.68), 0: np.float64(0.32)}"
+    },
+    {
+      "name": "Health: single-prediction latency < 50ms",
+      "status": "PASS",
+      "detail": "7.42ms avg over 200 calls"
+    },
+    {
+      "name": "Health: no NaN in predicted probabilities",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Health: all probabilities in [0,1]",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Health: model has learned feature importances",
+      "status": "PASS",
+      "detail": "top driver = credit_score"
+    },
+    {
+      "name": "Health: 5-fold CV ROC-AUC stable (std < 0.05)",
+      "status": "PASS",
+      "detail": "mean=0.8755 std=0.0040 scores=[0.874, 0.882, 0.878, 0.87, 0.874]"
+    },
+    {
+      "name": "Vehicle: model + meta load",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Vehicle: feature columns present in data",
+      "status": "PASS",
+      "detail": "16 features"
+    },
+    {
+      "name": "Vehicle: inference completes without error",
+      "status": "PASS",
+      "detail": "2000 rows in 2.7ms"
+    },
+    {
+      "name": "Vehicle: ROC-AUC >= 0.7",
+      "status": "PASS",
+      "detail": "0.9506"
+    },
+    {
+      "name": "Vehicle: F1 >= 0.55",
+      "status": "PASS",
+      "detail": "0.7616"
+    },
+    {
+      "name": "Vehicle: class balance reasonable",
+      "status": "PASS",
+      "detail": "ratio 3.00:1 -> {0: np.float64(0.75), 1: np.float64(0.25)}"
+    },
+    {
+      "name": "Vehicle: single-prediction latency < 50ms",
+      "status": "PASS",
+      "detail": "0.49ms avg over 200 calls"
+    },
+    {
+      "name": "Vehicle: no NaN in predicted probabilities",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Vehicle: all probabilities in [0,1]",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "name": "Vehicle: model has learned feature importances",
+      "status": "PASS",
+      "detail": "top driver = vehicle_value"
+    },
+    {
+      "name": "Vehicle: 5-fold CV ROC-AUC stable (std < 0.05)",
+      "status": "PASS",
+      "detail": "mean=0.9461 std=0.0013 scores=[0.947, 0.944, 0.948, 0.946, 0.946]"
+    },
+    {
+      "name": "Health: boundary case 'very old applicant (age=100)'",
+      "status": "PASS",
+      "detail": "proba=0.9600"
+    },
+    {
+      "name": "Health: boundary case 'very young applicant (age=18)'",
+      "status": "PASS",
+      "detail": "proba=0.9700"
+    },
+    {
+      "name": "Health: boundary case 'zero income'",
+      "status": "PASS",
+      "detail": "proba=0.8550"
+    },
+    {
+      "name": "Health: boundary case 'max-risk profile'",
+      "status": "PASS",
+      "detail": "proba=0.1500"
+    },
+    {
+      "name": "Health: boundary case 'min-risk profile'",
+      "status": "PASS",
+      "detail": "proba=0.9850"
+    },
+    {
+      "name": "Vehicle: boundary case 'very old vehicle (25yrs)'",
+      "status": "PASS",
+      "detail": "proba=0.0033"
+    },
+    {
+      "name": "Vehicle: boundary case 'brand new vehicle (0yrs)'",
+      "status": "PASS",
+      "detail": "proba=0.0016"
+    },
+    {
+      "name": "Vehicle: boundary case 'very young/new driver'",
+      "status": "PASS",
+      "detail": "proba=0.0056"
+    },
+    {
+      "name": "Vehicle: boundary case 'elderly driver (age=80)'",
+      "status": "PASS",
+      "detail": "proba=0.0012"
+    },
+    {
+      "name": "Vehicle: boundary case 'max-risk profile'",
+      "status": "PASS",
+      "detail": "proba=0.9921"
+    },
+    {
+      "name": "Vehicle: boundary case 'min-risk profile'",
+      "status": "PASS",
+      "detail": "proba=0.0016"
+    }
+  ],
+  "summary": {
+    "pass": 33,
+    "warn": 0,
+    "fail": 0
+  }
+}
