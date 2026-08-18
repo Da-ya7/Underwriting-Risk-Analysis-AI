@@ -170,15 +170,18 @@ async def submit_vehicle_proposal(
 
 
 # ---------- CLIENT: edit + resubmit a vehicle proposal (IN-PLACE update) ----------
-# Unlike the health/life edit endpoint, this does NOT create a new proposal
-# row. Same id, same policy number, same vehicle_id -- the proposals and
+# Same id, same policy number, same vehicle_id -- the proposals and
 # vehicles rows are UPDATEd directly. The pre-edit values (both rows) are
 # snapshotted into vehicle_proposal_history first, so old data isn't lost,
 # it's just no longer a separate visible "proposal" in the client's list.
-# Document/OCR fields are untouched (no re-upload required).
+# The document itself isn't re-uploaded, but the OCR fields extracted at
+# original submission time ARE re-compared against the edited name/age, and
+# the risk model is always re-run -- so both document validation and AI
+# risk analysis stay in sync with the edit automatically.
 @router.post("/proposals/{proposal_id}/edit", response_model=VehicleProposalSubmitResponse)
 def edit_vehicle_proposal(
     proposal_id: int,
+    full_name: str = Form(None, description="Applicant's full name — optional, keeps old value if omitted"),
     make: str = Form(...),
     model: str = Form(...),
     year: int = Form(...),
@@ -219,9 +222,10 @@ def edit_vehicle_proposal(
     if old["user_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
-    # Edit has no full_name form field — preserve original applicant name,
-    # don't overwrite with the logged-in editor's own name.
-    full_name = old["full_name"]
+    # Use the edited name if the client sent one, otherwise keep the
+    # original applicant name (don't overwrite with the logged-in editor's
+    # own name — old default behaviour, kept for callers that omit it).
+    full_name = full_name if full_name is not None and full_name.strip() != "" else old["full_name"]
 
     try:
         validated = RawVehicleProposalRequest(
@@ -247,6 +251,25 @@ def edit_vehicle_proposal(
         summary = build_summary(result["risk_score"], risk_factors, positive_factors)
     except KeyError as e:
         raise HTTPException(status_code=422, detail=f"Invalid value for field: {e}")
+
+    # Re-run document validation against the NEW name/driver_age. No
+    # re-upload happens on edit, so reuse the OCR fields already extracted
+    # at original submission time and re-compare against the edited data --
+    # otherwise the underwriter's Document Verification screen keeps
+    # showing a match/mismatch computed against the pre-edit values.
+    extracted = old.get("extracted_fields")
+    extracted = json.loads(extracted) if isinstance(extracted, str) else (extracted or {})
+    row_country_code = old.get("country_code") or "IN"
+    row_doc_type = old.get("doc_type") or "drivers_license"
+    val_results = json.loads(old["validation_results"]) if isinstance(old.get("validation_results"), str) else (old.get("validation_results") or [])
+    if extracted:
+        try:
+            schema = load_schema(row_country_code, row_doc_type)
+            val_results = validate_against_form(
+                extracted, {"full_name": full_name, "age": driver_age}, schema
+            )
+        except SchemaNotFoundError:
+            pass
 
     try:
         conn = get_connection()
@@ -288,11 +311,11 @@ def edit_vehicle_proposal(
         cur.execute(
             """UPDATE proposals SET full_name=%s, raw_input=%s, confidence=%s,
                risk_score=%s, reasoning_summary=%s, risk_factors=%s,
-               positive_factors=%s, status='PENDING', vehicle_id=%s
+               positive_factors=%s, validation_results=%s, status='PENDING', vehicle_id=%s
                WHERE id=%s""",
             (full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
              summary, json.dumps(risk_factors), json.dumps(positive_factors),
-             vehicle_id, proposal_id),
+             json.dumps(val_results), vehicle_id, proposal_id),
         )
         conn.commit()
         cur.close()

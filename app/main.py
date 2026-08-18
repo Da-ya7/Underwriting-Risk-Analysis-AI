@@ -247,10 +247,14 @@ async def submit_proposal(
 # Matches the vehicle edit endpoint's behaviour: same id, same policy
 # number, UPDATE in place -- no new row, no SUPERSEDED status. Pre-edit
 # state is snapshotted into proposal_history first so nothing is lost.
-# Document/OCR fields are carried over unchanged (no re-upload required).
+# The document itself isn't re-uploaded, but the OCR fields extracted at
+# original submission time ARE re-compared against the edited name/age, and
+# the risk model is always re-run -- so both document validation and AI
+# risk analysis stay in sync with the edit automatically.
 @app.post("/api/v1/proposals/{proposal_id}/edit", response_model=ProposalSubmitResponse)
 def edit_proposal(
     proposal_id: int,
+    full_name: str = Form(None, description="Applicant's full name — optional, keeps old value if omitted"),
     age: int = Form(...),
     annual_income: float = Form(...),
     sum_assured: float = Form(...),
@@ -284,9 +288,13 @@ def edit_proposal(
                    f"Use POST /api/v1/vehicle/proposals/{proposal_id}/edit instead.",
         )
 
+    # Applicant name: use the edited value if the client sent one, otherwise
+    # keep whatever was there before (mirrors old behaviour for old clients).
+    new_full_name = full_name if full_name is not None and full_name.strip() != "" else old["full_name"]
+
     try:
         validated = ClientProposalSubmit(
-            full_name=old["full_name"], insurance_type=old["insurance_type"], age=age,
+            full_name=new_full_name, insurance_type=old["insurance_type"], age=age,
             annual_income=annual_income, sum_assured=sum_assured,
             height_cm=height_cm, weight_kg=weight_kg, smoker=smoker,
             alcohol_consumption=alcohol_consumption,
@@ -313,6 +321,26 @@ def edit_proposal(
     risk_factors, positive_factors = build_explanation(applicant, underwriting_model.meta)
     summary = build_summary(result["risk_score"], risk_factors, positive_factors)
 
+    # Re-run document validation against the NEW form values (name/age may
+    # have changed). No re-upload happens on edit, so we re-use the
+    # already-extracted OCR fields stored at original submission time and
+    # just re-compare them against the edited applicant data -- otherwise
+    # the underwriter's Document Verification screen keeps showing a
+    # match/mismatch computed against the pre-edit name/age forever.
+    extracted = old.get("extracted_fields")
+    extracted = json.loads(extracted) if isinstance(extracted, str) else (extracted or {})
+    row_country_code = old.get("country_code") or "IN"
+    row_doc_type = old.get("doc_type") or "aadhaar"
+    val_results = []
+    if extracted:
+        try:
+            schema = load_schema(row_country_code, row_doc_type)
+            val_results = validate_against_form(
+                extracted, {"full_name": new_full_name, "age": age}, schema
+            )
+        except SchemaNotFoundError:
+            val_results = json.loads(old["validation_results"]) if isinstance(old.get("validation_results"), str) else (old.get("validation_results") or [])
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -325,15 +353,17 @@ def edit_proposal(
     )
 
     # Update the existing row in place -- same id, same policy number.
-    # Re-scored + back to PENDING since the applicant data changed.
+    # Re-scored + back to PENDING since the applicant data changed. Name
+    # and document validation are refreshed too, not just the risk score.
     cur.execute(
-        """UPDATE proposals SET raw_input=%s, confidence=%s, risk_score=%s,
+        """UPDATE proposals SET full_name=%s, raw_input=%s, confidence=%s, risk_score=%s,
            reasoning_summary=%s, risk_factors=%s, positive_factors=%s,
-           status='PENDING'
+           validation_results=%s, status='PENDING'
            WHERE id=%s""",
         (
-            json.dumps(raw), result["risk_confidence"], result["risk_score"],
+            new_full_name, json.dumps(raw), result["risk_confidence"], result["risk_score"],
             summary, json.dumps(risk_factors), json.dumps(positive_factors),
+            json.dumps(val_results),
             proposal_id,
         ),
     )
