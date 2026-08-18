@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/v1/vehicle", tags=["vehicle"])
 
 @router.post("/proposals", response_model=VehicleProposalSubmitResponse)
 async def submit_vehicle_proposal(
+    full_name: str = Form(..., description="Name of the person the policy is FOR — may differ from the logged-in account"),
     make: str = Form(...),
     model: str = Form(...),
     year: int = Form(...),
@@ -48,9 +49,8 @@ async def submit_vehicle_proposal(
     file: UploadFile = File(...),
     current_user: CurrentUser = Depends(require_role("client")),
 ):
-    full_name = current_user.full_name
-
-    # Duplicate-request guard: block a second submission for insurance_type='vehicle'
+    # full_name is the applicant's name (from form), not forced to the
+    # logged-in account — broker/family submissions need these to differ.
     # while an earlier one from this user is still PENDING.
     dup_conn = get_connection()
     dup_cur = dup_conn.cursor(dictionary=True)
@@ -219,7 +219,9 @@ def edit_vehicle_proposal(
     if old["user_id"] != current_user.id:
         raise HTTPException(status_code=403, detail="You do not have access to this proposal")
 
-    full_name = current_user.full_name
+    # Edit has no full_name form field — preserve original applicant name,
+    # don't overwrite with the logged-in editor's own name.
+    full_name = old["full_name"]
 
     try:
         validated = RawVehicleProposalRequest(

@@ -248,6 +248,31 @@ def init_db():
         if e.errno != 1061:
             raise
 
+    # proposal_history: same idea as vehicle_proposal_history, but for
+    # health/life proposals now that edits UPDATE the row in place instead
+    # of creating a new SUPERSEDED row. Pre-edit snapshot goes here so
+    # nothing is lost, and the policy number (id) stays immutable across edits.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS proposal_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            proposal_id INT NOT NULL,
+            snapshot JSON NOT NULL,
+            edited_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
+    try:
+        cur.execute(
+            "CREATE INDEX idx_proposal_history_proposal_id "
+            "ON proposal_history (proposal_id)"
+        )
+        conn.commit()
+    except Error as e:
+        if e.errno != 1061:
+            raise
+
     cur.close()
     conn.close()
 

@@ -16,7 +16,7 @@ import io
 import json
 import uuid
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import ValidationError
 
 from .schemas import RawVehicleProposalRequest
@@ -63,12 +63,11 @@ def _read_sheet(filename: str, content: bytes) -> pd.DataFrame:
 async def bulk_upload_vehicle_proposals(
     sheet: UploadFile = File(..., description="CSV/XLS/XLSX — one row per vehicle"),
     file: UploadFile = File(..., description="Driving license photo — reused for every row"),
+    full_name: str = Form(..., description="Name of the person the policy is FOR — may differ from the logged-in account"),
     country_code: str = "IN",
     doc_type: str = "drivers_license",
     current_user: CurrentUser = Depends(require_role("client")),
 ):
-    full_name = current_user.full_name
-
     sheet_bytes = await sheet.read()
     df = _read_sheet(sheet.filename, sheet_bytes)
     df.columns = [str(c).strip().lower() for c in df.columns]

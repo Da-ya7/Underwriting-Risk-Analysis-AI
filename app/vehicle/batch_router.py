@@ -15,7 +15,7 @@ import json
 import uuid
 from typing import List
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import ValidationError
+from pydantic import ValidationError, BaseModel
 
 from .schemas import RawVehicleProposalRequest
 from .conversion import convert_raw_vehicle_proposal
@@ -28,15 +28,24 @@ from ..auth.schemas import CurrentUser
 router = APIRouter(prefix="/api/v1/vehicle", tags=["vehicle-batch"])
 
 
+class VehicleBatchSubmit(BaseModel):
+    # Name of the person the policy is FOR — may differ from the logged-in
+    # account (broker/family submissions). Required so a broker submitting
+    # for a client doesn't get the broker's own name stamped on the policy.
+    full_name: str
+    vehicles: List[RawVehicleProposalRequest]
+
+
 @router.post("/proposals/batch")
 def submit_vehicle_proposals_batch(
-    vehicles: List[RawVehicleProposalRequest],
+    payload: VehicleBatchSubmit,
     current_user: CurrentUser = Depends(require_role("client")),
 ):
+    vehicles = payload.vehicles
+    full_name = payload.full_name
     if len(vehicles) == 0:
         raise HTTPException(status_code=422, detail="No vehicles provided")
 
-    full_name = current_user.full_name
     results = []
 
     # fleet_group_id: only assigned when submitting more than 1 vehicle at

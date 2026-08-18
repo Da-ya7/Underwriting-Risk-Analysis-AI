@@ -92,6 +92,7 @@ def underwrite_from_proposal(raw_proposal: RawProposalRequest):
 @app.post("/api/v1/proposals", response_model=ProposalSubmitResponse)
 async def submit_proposal(
     file: UploadFile = File(..., description="ID/certificate — required, attached with the form"),
+    full_name: str = Form(..., description="Name of the person the policy is FOR — may differ from the logged-in account (broker/family submissions)"),
     insurance_type: str = Form(...),
     age: int = Form(...),
     annual_income: float = Form(...),
@@ -112,10 +113,11 @@ async def submit_proposal(
     doc_type: str = Form("aadhaar"),
     current_user: CurrentUser = Depends(require_role("client")),
 ):
-    # full_name now comes from the authenticated account, not the form —
-    # prevents a logged-in user submitting a proposal under someone else's name.
-    full_name = current_user.full_name
-
+    # full_name is the APPLICANT's name (who the policy is for), taken from
+    # the form — NOT forced to the logged-in account's name. A broker or a
+    # family member submitting on someone else's behalf needs this to differ
+    # from current_user.full_name. current_user.id (below) still tracks who
+    # actually submitted it, for ownership/auth checks.
     try:
         # validate form fields against same rules as before (raises 422 on bad input)
         try:
@@ -241,14 +243,11 @@ async def submit_proposal(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- CLIENT: edit + resubmit a proposal (creates a NEW version) ----------
-# Mentor's "tran_id" versioning: this does NOT overwrite the old row. It
-# inserts a brand new proposal row (new id/"tran_id"), links it to the same
-# version_root_id as the original, marks the OLD row status='SUPERSEDED',
-# and re-runs the risk model on the updated fields. Old row stays in the DB
-# untouched (audit trail) but is hidden from normal list views. Document/
-# OCR fields are carried over unchanged from the old row -- editing form
-# fields doesn't require re-uploading the ID document every time.
+# ---------- CLIENT: edit + resubmit a proposal (IN-PLACE update) ----------
+# Matches the vehicle edit endpoint's behaviour: same id, same policy
+# number, UPDATE in place -- no new row, no SUPERSEDED status. Pre-edit
+# state is snapshotted into proposal_history first so nothing is lost.
+# Document/OCR fields are carried over unchanged (no re-upload required).
 @app.post("/api/v1/proposals/{proposal_id}/edit", response_model=ProposalSubmitResponse)
 def edit_proposal(
     proposal_id: int,
@@ -285,11 +284,9 @@ def edit_proposal(
                    f"Use POST /api/v1/vehicle/proposals/{proposal_id}/edit instead.",
         )
 
-    root_id = old["version_root_id"] or old["id"]  # backward-compat if somehow still NULL
-
     try:
         validated = ClientProposalSubmit(
-            full_name=current_user.full_name, insurance_type=old["insurance_type"], age=age,
+            full_name=old["full_name"], insurance_type=old["insurance_type"], age=age,
             annual_income=annual_income, sum_assured=sum_assured,
             height_cm=height_cm, weight_kg=weight_kg, smoker=smoker,
             alcohol_consumption=alcohol_consumption,
@@ -318,32 +315,33 @@ def edit_proposal(
 
     conn = get_connection()
     cur = conn.cursor()
+
+    # Snapshot pre-edit state before overwriting -- audit trail, mirrors
+    # vehicle_proposal_history.
     cur.execute(
-        """INSERT INTO proposals
-           (full_name, insurance_type, raw_input, confidence, risk_score,
-            reasoning_summary, risk_factors, positive_factors, status,
-            document_blob, document_filename, document_mimetype,
-            extracted_fields, validation_results, country_code, doc_type,
-            user_id, version_root_id)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        """INSERT INTO proposal_history (proposal_id, snapshot)
+           VALUES (%s,%s)""",
+        (proposal_id, json.dumps(old, default=str)),
+    )
+
+    # Update the existing row in place -- same id, same policy number.
+    # Re-scored + back to PENDING since the applicant data changed.
+    cur.execute(
+        """UPDATE proposals SET raw_input=%s, confidence=%s, risk_score=%s,
+           reasoning_summary=%s, risk_factors=%s, positive_factors=%s,
+           status='PENDING'
+           WHERE id=%s""",
         (
-            current_user.full_name, old["insurance_type"], json.dumps(raw),
-            result["risk_confidence"], result["risk_score"],
+            json.dumps(raw), result["risk_confidence"], result["risk_score"],
             summary, json.dumps(risk_factors), json.dumps(positive_factors),
-            old["document_blob"], old["document_filename"], old["document_mimetype"],
-            old["extracted_fields"], old["validation_results"],
-            old["country_code"], old["doc_type"], current_user.id, root_id,
+            proposal_id,
         ),
     )
-    conn.commit()
-    new_id = cur.lastrowid
-
-    cur.execute("UPDATE proposals SET status='SUPERSEDED' WHERE id=%s", (proposal_id,))
     conn.commit()
     cur.close()
     conn.close()
 
-    return ProposalSubmitResponse(id=new_id, status="PENDING")
+    return ProposalSubmitResponse(id=proposal_id, status="PENDING")
 
 
 # ---------- List proposals: client sees own only, underwriter sees all ----------
