@@ -21,7 +21,7 @@ from .schemas import RawVehicleProposalRequest
 from .conversion import convert_raw_vehicle_proposal
 from .model_service import vehicle_underwriting_model
 from .explain import build_explanation, build_summary
-from ..db import get_connection
+from ..db import get_connection, find_duplicate_pending_proposal
 from ..auth.dependencies import require_role, get_current_user
 from ..auth.schemas import CurrentUser
 
@@ -53,27 +53,22 @@ def submit_vehicle_proposals_batch(
     # (fleet_group_id=NULL), identical to the single-submit endpoint.
     fleet_group_id = str(uuid.uuid4()) if len(vehicles) > 1 else None
 
-    # Duplicate-request guard: checked ONCE for the whole batch, not per-row.
-    dup_conn = get_connection()
-    dup_cur = dup_conn.cursor(dictionary=True)
-    dup_cur.execute(
-        """SELECT id, status FROM proposals
-           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
-           LIMIT 1""",
-        (current_user.id,),
-    )
-    existing = dup_cur.fetchone()
-    dup_cur.close()
-    dup_conn.close()
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"You already have a pending vehicle proposal (id #{existing['id']}). "
-                   f"Wait for a decision before submitting a new batch.",
-        )
-
+    # Duplicate-request guard: checked PER VEHICLE, not once for the whole
+    # batch — a broker submitting N different clients' vehicles in one call
+    # should only get blocked on the ones that are true exact repeats of an
+    # already-PENDING proposal for this user, not the entire batch.
     for idx, validated in enumerate(vehicles):
         raw = validated.model_dump()
+
+        dup_id = find_duplicate_pending_proposal(current_user.id, "vehicle", full_name, raw)
+        if dup_id:
+            results.append({
+                "index": idx, "status": "error",
+                "reason": f"Proposal request already found waiting for underwriter "
+                          f"decision (id #{dup_id}). Change at least one detail to "
+                          f"submit a new one.",
+            })
+            continue
 
         try:
             converted = convert_raw_vehicle_proposal(raw)

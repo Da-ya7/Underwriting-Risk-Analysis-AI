@@ -23,7 +23,7 @@ from .schemas import RawVehicleProposalRequest
 from .conversion import convert_raw_vehicle_proposal
 from .model_service import vehicle_underwriting_model
 from .explain import build_explanation, build_summary
-from ..db import get_connection
+from ..db import get_connection, find_duplicate_pending_proposal
 from ..auth.dependencies import require_role
 from ..auth.schemas import CurrentUser
 
@@ -110,27 +110,10 @@ async def bulk_upload_vehicle_proposals(
         extracted = extract_fields(ocr_text, schema)
         val_results = validate_against_form(extracted, {"full_name": full_name, "age": first_driver_age}, schema)
 
-    # Duplicate-request guard: checked ONCE for the whole sheet, not per-row.
-    # BUG FIX: was previously inside the loop -- row 1's insert set
-    # status='PENDING', so row 2's check found row 1 and skipped itself,
-    # then row 3 found row 1 too, etc. Only row 1 ever got created.
-    dup_conn = get_connection()
-    dup_cur = dup_conn.cursor(dictionary=True)
-    dup_cur.execute(
-        """SELECT id, status FROM proposals
-           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
-           LIMIT 1""",
-        (current_user.id,),
-    )
-    existing = dup_cur.fetchone()
-    dup_cur.close()
-    dup_conn.close()
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"You already have a pending vehicle proposal (id #{existing['id']}). "
-                   f"Wait for a decision before uploading a new sheet.",
-        )
+    # Duplicate-request guard: checked PER ROW, not once for the whole sheet
+    # — a broker uploading many different clients' vehicles in one sheet
+    # should only get blocked on rows that are true exact repeats of an
+    # already-PENDING proposal for this user, not the whole upload.
 
     # fleet_group_id: shared across every row in this sheet when there's
     # more than 1 row (matches batch_router.py's rule -- lone row stays
@@ -161,6 +144,17 @@ async def bulk_upload_vehicle_proposals(
             continue
 
         raw = validated.model_dump()
+
+        dup_id = find_duplicate_pending_proposal(current_user.id, "vehicle", full_name, raw)
+        if dup_id:
+            results.append({
+                "row": row_num, "status": "error",
+                "reason": f"Proposal request already found waiting for underwriter "
+                          f"decision (id #{dup_id}). Change at least one detail to "
+                          f"submit a new one.",
+            })
+            continue
+
         try:
             converted = convert_raw_vehicle_proposal(raw)
             result = vehicle_underwriting_model.predict(converted)

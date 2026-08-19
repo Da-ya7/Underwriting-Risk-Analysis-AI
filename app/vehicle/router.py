@@ -6,7 +6,7 @@ from .schemas import RawVehicleProposalRequest, VehicleProposalSubmitResponse
 from .conversion import convert_raw_vehicle_proposal
 from .model_service import vehicle_underwriting_model
 from .explain import build_explanation, build_summary
-from ..db import get_connection
+from ..db import get_connection, find_duplicate_pending_proposal
 from ..auth.dependencies import get_current_user, require_role
 from ..auth.schemas import CurrentUser
 
@@ -51,26 +51,6 @@ async def submit_vehicle_proposal(
 ):
     # full_name is the applicant's name (from form), not forced to the
     # logged-in account — broker/family submissions need these to differ.
-    # while an earlier one from this user is still PENDING.
-    dup_conn = get_connection()
-    dup_cur = dup_conn.cursor(dictionary=True)
-    dup_cur.execute(
-        """SELECT id, status FROM proposals
-           WHERE user_id=%s AND insurance_type='vehicle' AND status='PENDING'
-           LIMIT 1""",
-        (current_user.id,),
-    )
-    existing = dup_cur.fetchone()
-    dup_cur.close()
-    dup_conn.close()
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"You already have a pending vehicle request "
-                   f"(id #{existing['id']}, status: {existing['status']}). "
-                   f"Wait for a decision before submitting another.",
-        )
-
     try:
         validated = RawVehicleProposalRequest(
             make=make, model=model, year=year, vehicle_type=vehicle_type,
@@ -87,6 +67,20 @@ async def submit_vehicle_proposal(
         raise HTTPException(status_code=422, detail=e.errors())
 
     raw = validated.model_dump()
+
+    # Duplicate-request guard: block only an EXACT resubmission (same
+    # applicant, same field values) of a PENDING vehicle proposal for this
+    # user. A broker submitting different clients' vehicles, or the same
+    # client with any changed field, goes through — no blanket "wait for
+    # your last one" lock.
+    dup_id = find_duplicate_pending_proposal(current_user.id, "vehicle", full_name, raw)
+    if dup_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Proposal request already found waiting for underwriter "
+                   f"decision (id #{dup_id}). Change at least one detail to "
+                   f"submit a new one.",
+        )
 
     try:
         converted = convert_raw_vehicle_proposal(raw)

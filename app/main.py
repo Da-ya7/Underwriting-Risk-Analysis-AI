@@ -22,7 +22,7 @@ from .schemas import (
 from .model_service import underwriting_model
 from .explain import build_explanation, build_summary
 from .conversion import convert_raw_proposal
-from .db import get_connection, init_db
+from .db import get_connection, init_db, find_duplicate_pending_proposal
 from .auth.router import router as auth_router
 from .vehicle.router import router as vehicle_router
 from .vehicle.bulk_router import router as vehicle_bulk_router
@@ -142,27 +142,23 @@ async def submit_proposal(
         except SchemaNotFoundError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        # Duplicate-request guard: block a second submission for the same
-        # insurance_type while an earlier one from this user is still PENDING.
-        # Once that earlier one is APPROVED or REJECTED, this check clears
-        # and a new request for the same insurance_type is allowed again.
-        dup_conn = get_connection()
-        dup_cur = dup_conn.cursor(dictionary=True)
-        dup_cur.execute(
-            """SELECT id, status FROM proposals
-               WHERE user_id=%s AND insurance_type=%s AND status='PENDING'
-               LIMIT 1""",
-            (current_user.id, insurance_type),
+        # Duplicate-request guard: block only an EXACT resubmission (same
+        # applicant, same field values) of a proposal still PENDING for
+        # this user. A broker submitting different clients, or the same
+        # client with any changed field, goes through fine — no more
+        # "wait for your last one to be decided" blanket lock.
+        raw_for_dup_check = validated.model_dump()
+        raw_for_dup_check.pop("full_name")
+        raw_for_dup_check.pop("insurance_type")
+        dup_id = find_duplicate_pending_proposal(
+            current_user.id, insurance_type, full_name, raw_for_dup_check
         )
-        existing = dup_cur.fetchone()
-        dup_cur.close()
-        dup_conn.close()
-        if existing:
+        if dup_id:
             raise HTTPException(
                 status_code=409,
-                detail=f"You already have a pending {insurance_type} request "
-                       f"(id #{existing['id']}, status: {existing['status']}). "
-                       f"Wait for a decision before submitting another.",
+                detail=f"Proposal request already found waiting for underwriter "
+                       f"decision (id #{dup_id}). Change at least one detail to "
+                       f"submit a new one.",
             )
 
         raw = validated.model_dump()

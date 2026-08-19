@@ -29,6 +29,44 @@ def get_connection(with_db=True):
     return mysql.connector.connect(**cfg)
 
 
+def find_duplicate_pending_proposal(user_id, insurance_type, full_name, raw_data):
+    """
+    Content-based duplicate guard (replaces the old "any PENDING proposal of
+    this type blocks everything" rule, which broke brokers submitting many
+    different clients' proposals back-to-back).
+
+    Only flags it as a duplicate when a PENDING proposal from this user, of
+    the same insurance_type, for the SAME applicant (full_name) with the
+    EXACT SAME submitted field values already exists. Two different people,
+    or the same person with even one different field, are allowed through.
+
+    Returns the existing proposal's id if a true duplicate is found, else None.
+    """
+    import json as _json
+
+    conn = get_connection()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        """SELECT id, full_name, raw_input FROM proposals
+           WHERE user_id=%s AND insurance_type=%s AND status='PENDING'""",
+        (user_id, insurance_type),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    for row in rows:
+        if (row["full_name"] or "").strip().lower() != (full_name or "").strip().lower():
+            continue
+        try:
+            existing_data = _json.loads(row["raw_input"])
+        except (TypeError, ValueError):
+            continue
+        if existing_data == raw_data:
+            return row["id"]
+    return None
+
+
 def _add_column_if_missing(cur, table, col_def):
     """
     col_def example: 'document_blob LONGBLOB'.
