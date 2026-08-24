@@ -193,9 +193,33 @@ def validate_age(form_age, doc_dob: str, tolerance_years: int = 1, date_format: 
     }
 
 
+def _luhn_checksum_ok(digits: str) -> bool:
+    """Standard Luhn (mod10) check digit validation. Used by SA ID numbers
+    (last digit is the check digit) — catches single-digit OCR misreads
+    (e.g. 8<->0, 9<->0) that a plain \\d{13} regex would silently accept."""
+    if not digits.isdigit():
+        return False
+    total = 0
+    reverse = digits[::-1]
+    for i, ch in enumerate(reverse):
+        d = int(ch)
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+_CHECKSUM_FNS = {
+    "luhn": _luhn_checksum_ok,
+}
+
+
 def validate_id_number(id_number: str, schema: dict):
     id_field_config = schema.get("fields", {}).get("id_number", {})
     pattern = id_field_config.get("regex")
+    checksum_kind = id_field_config.get("checksum")
 
     if not id_number:
         return {"field": "id_number", "valid": False, "reason": "ID number not found in document"}
@@ -208,13 +232,26 @@ def validate_id_number(id_number: str, schema: dict):
     # them literally as part of the pattern.
     cleaned = re.sub(r'\s+', '', id_number.strip())
 
-    valid = bool(re.match(pattern, cleaned)) or bool(re.match(pattern, id_number.strip()))
-    return {
-        "field": "id_number",
-        "document_value": id_number,
-        "valid": valid,
-        "reason": None if valid else f"ID number format does not match expected pattern for {schema['doc_name']}",
-    }
+    format_valid = bool(re.match(pattern, cleaned)) or bool(re.match(pattern, id_number.strip()))
+    if not format_valid:
+        return {
+            "field": "id_number",
+            "document_value": id_number,
+            "valid": False,
+            "reason": f"ID number format does not match expected pattern for {schema['doc_name']}",
+        }
+
+    if checksum_kind:
+        checksum_fn = _CHECKSUM_FNS.get(checksum_kind)
+        if checksum_fn and not checksum_fn(cleaned):
+            return {
+                "field": "id_number",
+                "document_value": id_number,
+                "valid": False,
+                "reason": f"ID number fails {checksum_kind} checksum — likely an OCR digit misread, re-scan document",
+            }
+
+    return {"field": "id_number", "document_value": id_number, "valid": True, "reason": None}
 
 
 def validate_against_form(extracted_fields: dict, form_data: dict, schema: dict) -> list:

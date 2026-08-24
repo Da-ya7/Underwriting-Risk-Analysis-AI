@@ -6,11 +6,25 @@
   "script_direction": "ltr",
   "date_format": "YYYY-MM-DD",
   "fields": {
-    "name": {"required": true},
-    "dob": {"required": true},
-    "id_number": {"required": true, "regex": "^\\d{13}$"},
-    "address": {"required": false},
-    "expiry_date": {"required": false},
-    "issue_date": {"required": false}
+    "name": {
+      "required": true
+    },
+    "dob": {
+      "required": true
+    },
+    "id_number": {
+      "required": true,
+      "regex": "^\\d{13}$",
+      "checksum": "luhn"
+    },
+    "address": {
+      "required": false
+    },
+    "expiry_date": {
+      "required": false
+    },
+    "issue_date": {
+      "required": false
+    }
   }
 }

@@ -10,7 +10,8 @@ from ..db import get_connection, find_duplicate_pending_proposal
 from ..auth.dependencies import get_current_user, require_role
 from ..auth.schemas import CurrentUser
 
-from ..document_validation.router import _decode_image, _preprocess_for_ocr
+from ..document_validation.router import _decode_image
+from ..document_validation.ocr_preprocess import run_ocr_pipeline
 from ..document_validation.llm_extract import extract_fields
 from ..document_validation.validator import validate_against_form
 from ..document_validation.schema_loader import load_schema, SchemaNotFoundError
@@ -102,19 +103,22 @@ async def submit_vehicle_proposal(
     except Exception:
         img = None
     if img is not None:
-        processed = _preprocess_for_ocr(img)
-        ocr_text_eng = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
-        ocr_text_regional = ""
         schema_lang = schema.get("language", "eng")
+        variants_eng, best_eng = run_ocr_pipeline(img, lang="eng", psm=6)
+        passes = [
+            f"--- OCR PASS {i} (eng, {name} variant, conf={r['mean_conf']:.0f}) ---\n{r['corrected_text']}"
+            for i, (name, r) in enumerate(variants_eng.items(), start=1)
+        ]
         if schema_lang != "eng":
             try:
-                ocr_text_regional = pytesseract.image_to_string(processed, lang=schema_lang, config="--psm 6")
-            except pytesseract.TesseractError:
+                variants_reg, _ = run_ocr_pipeline(img, lang=schema_lang, psm=6)
+                passes += [
+                    f"--- OCR PASS R{i} (lang={schema_lang}, {name} variant, conf={r['mean_conf']:.0f}) ---\n{r['corrected_text']}"
+                    for i, (name, r) in enumerate(variants_reg.items(), start=1)
+                ]
+            except Exception:
                 pass
-        ocr_text = (
-            "--- OCR PASS 1 (English only) ---\n" + ocr_text_eng +
-            f"\n--- OCR PASS 2 (schema lang: {schema_lang}) ---\n" + ocr_text_regional
-        )
+        ocr_text = "\n".join(passes)
         extracted = extract_fields(ocr_text, schema)
         val_results = validate_against_form(
             extracted, {"full_name": full_name, "age": driver_age}, schema
